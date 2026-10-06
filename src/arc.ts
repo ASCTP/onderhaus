@@ -5,9 +5,13 @@
  *
  * Arc pays gas in USDC rather than in a separate native token, so the account the service
  * spends from is the same account it monitors, which is the role the Stellar account plays
- * for XLM. The balance read here is the chain's native balance. It is deliberately not the
- * ERC-20 USDC contract that CCTP mints and burns: that is a separate 6-decimal token, and
- * the service pays gas without ever holding it.
+ * for XLM. The balance read here is the chain's native balance, reported at 18 decimals.
+ *
+ * That balance and the 6-decimal ERC-20 USDC that CCTP mints and burns are the same asset at
+ * two precisions rather than two tokens. Verified on testnet: a native balance of
+ * 18.99551755 reads as 18.995517 through the contract, the native figure truncated, and the
+ * two move together. The floor is expressed in the native scale for that reason, since a
+ * scale error here is a factor of a trillion and does not fail loudly.
  *
  * The signer wraps a viem WalletClient, which is what the SDK's ArcSigner type requires.
  * viem is therefore a direct dependency of this service, declared in package.json like

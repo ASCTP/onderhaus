@@ -15,9 +15,9 @@ Arc settles on Arc, where gas is paid in native USDC, and is funded from a secon
 
 This is Phase 1 of three, and it is an early proof that runs rather than a product with
 users. What exists today is a single authenticated service that completes transfers in both
-directions. Arc to Stellar has been exercised end to end on testnet. Nothing has been run
-against a funded account on mainnet, and there is no hosted instance and no demo page. See
-[Scope](#scope) for the precise boundary.
+directions, and both directions have been exercised end to end on testnet. Nothing has been
+run against a funded account on mainnet, and there is no hosted instance and no demo page.
+See [Scope](#scope) for the precise boundary.
 
 ## The gap this fills
 
@@ -178,8 +178,6 @@ Not built:
 
 - A hosted instance and a demo page, which is Phase 3.
 - A mainnet run. Everything so far has been on testnet.
-- A live Stellar to Arc settlement. The reverse direction is implemented and unit tested,
-  but has not yet been exercised against a real burn end to end.
 - Any on-chain fee mechanism. See the fee model below.
 - Batch submission. Each completion is one request.
 
@@ -258,10 +256,13 @@ See [`.env.example`](.env.example) for the full list with notes. The values that
 | `TRUST_PROXY` | Set true only behind a proxy you control, so the per-address limit sees the real client address rather than the proxy's. |
 
 One detail about the Arc floor is worth stating plainly, because it is easy to get wrong.
-Arc pays gas in USDC as the chain's native token, and that balance is reported at 18 decimals.
-The ERC-20 USDC contract that CCTP mints and burns is a separate 6-decimal token. The service
-spends gas from the native balance and never holds the ERC-20, so `USDC_LOW_BALANCE_FLOOR` is
-measured against the native balance, not against the amount of USDC that has been transferred.
+Arc pays gas in USDC as the chain's native token, and that balance is reported at 18
+decimals. The ERC-20 USDC that CCTP mints and burns is the same asset seen through a
+6-decimal contract, not a second token: on testnet a native balance of 18.99551755 reads as
+18.995517 through the contract, the native figure truncated to six places, and the two move
+together through a burn and a settlement. So `USDC_LOW_BALANCE_FLOOR` is measured against
+the native balance, and a floor written in the wrong scale is wrong by a factor of a
+trillion without failing loudly.
 
 ## Development
 
@@ -277,7 +278,10 @@ Tests inject fakes for the two SDK calls that would otherwise reach the network,
 suite runs offline and never spends anything. `pnpm test` currently passes with 85 tests
 across 4 files.
 
-An Arc to Stellar transfer has been completed against a live testnet burn. Burn
+Both directions have been completed against a live testnet burn produced outside the
+service, and each settlement was then verified independently of it.
+
+Arc to Stellar. Burn
 `0x24d19d7515f72359fa7bb8b066674b1bb7de4c32a0a424d59717641b03f80783` was submitted and
 settled as Stellar transaction
 `c60dafc3e40bfb65fd72499ce649affa7d030650d66c93fe616b3630de1637e8` in ledger 5056172. The
@@ -285,8 +289,18 @@ recipient held 1.0000000 USDC afterwards, with their XLM balance untouched by th
 service account paid 186890 stroops, the ledger row recorded one attempt, and replaying the
 same burn returned `replayed: true` without a second submission.
 
-No mainnet transfer has been run, and the Stellar to Arc direction has not been exercised
-against a live settlement.
+Stellar to Arc. Burn
+`a62a448a3b5fb826644f26717c8a2e295ab772af47f337715dfb20ab3aaebb10` was produced by a
+`transfer` call with no `destinationSigner`, which leaves the SDK returning a `pending`
+transfer and completion to whoever holds the hash. The service completed it in 3.783 seconds
+as Arc transaction
+`0xed4f8572b9c3c598235edc45844e1e20bba0cdc2a0dc940ad22c3f1ba4cb1081` in block 65830403,
+status success, from the service's own Arc key. The receipt was read independently: 186731
+gas at 0.000000025 USDC per gas, a fee of 0.004668275 USDC. The recipient's balance read
+exactly 0.5 USDC afterwards and the service's native balance fell by exactly the fee.
+Replaying the same burn returned `replayed: true` without a second submission.
+
+No mainnet transfer has been run in either direction.
 
 ## License
 

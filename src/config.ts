@@ -84,8 +84,9 @@ export function xlmToStroops(amount: string): bigint {
 
 /**
  * Converts a human USDC amount into wei, which is the scale Arc reports its native gas
- * token at. The floor is expressed this way because the service spends native USDC on Arc
- * gas, not the 6-decimal ERC-20 that CCTP moves.
+ * token at. That balance and the 6-decimal ERC-20 USDC that CCTP moves are the same asset at
+ * two precisions, so the floor is expressed in the native scale the service actually spends
+ * from. See src/arc.ts for how that was established.
  */
 export function usdcToWei(amount: string, network: Network): bigint {
   return asConfigError(() => parseFixed(amount, arcNativeDecimals(network), "USDC amount"));
