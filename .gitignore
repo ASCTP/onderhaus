@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+
+# Runtime state. The ledger holds metering data and API key hashes, and the WAL and SHM
+# files are part of the same database, so all three stay out of version control.
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets. The service key is the most sensitive value in this repository and must never
+# be committed. See .env.example for the shape without values.
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+Thumbs.db
