@@ -37,10 +37,11 @@ USDC trustline.
 ## What a recipient still needs
 
 A Stellar account must exist on-ledger and hold a USDC trustline before it can receive USDC.
-Neither is something this service can set up on a stranger's behalf, since both require the
-recipient's own signature. A transfer to an account without a trustline cannot land, so the
-service checks both conditions before spending anything and refuses with a clear error if
-either is missing.
+The trustline is the half this service cannot set up for a recipient, because `change_trust`
+is signed by the account owner. Activation is the easier half, since `create_account` is
+signed only by the funder, but this service performs neither and treats both as preconditions.
+A transfer to an account without a trustline cannot land, so the service checks both
+conditions before spending anything and refuses with a clear error if either is missing.
 
 ## Quick start
 
