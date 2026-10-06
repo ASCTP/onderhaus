@@ -23,6 +23,9 @@ importers:
       fastify:
         specifier: ^5.2.0
         version: 5.12.5
+      viem:
+        specifier: ^2.57.3
+        version: 2.57.3(typescript@5.9.3)
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.12

@@ -4,6 +4,10 @@
  */
 
 import { describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Store, generateApiKey, hashApiKey } from "../src/db.js";
 import { VALID_BURN_TX, VALID_RECIPIENT } from "./helpers.js";
 
@@ -96,6 +100,7 @@ describe("mint ledger", () => {
     apiKeyId,
     burnTxHash,
     network: "testnet",
+    direction: "arc->stellar",
     recipient: VALID_RECIPIENT,
   });
 
@@ -159,5 +164,54 @@ describe("mint ledger", () => {
     s.beginMint(args(record.id));
 
     expect(s.countMintsByStatus()).toEqual({ in_progress: 1 });
+  });
+
+  it("records which direction the row was for", () => {
+    const s = store();
+    const { record } = s.createApiKey("acme", null, 60);
+
+    const begun = s.beginMint({ ...args(record.id), direction: "stellar->arc" });
+
+    expect(begun.kind).toBe("created");
+    expect(begun.record.direction).toBe("stellar->arc");
+  });
+
+  it("backfills the direction on a database created before the reverse existed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "onderhaus-legacy-"));
+    const path = join(dir, "legacy.db");
+    try {
+      // The schema exactly as an Arc-to-Stellar-only deployment left it, with one row in
+      // it, so the migration has to add a NOT NULL column to a populated table.
+      const legacy = new Database(path);
+      legacy.exec(`
+        CREATE TABLE mints (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          api_key_id INTEGER NOT NULL,
+          burn_tx_hash TEXT NOT NULL,
+          network TEXT NOT NULL,
+          recipient TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 1,
+          mint_tx_hash TEXT,
+          attestation_hash TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO mints (api_key_id, burn_tx_hash, network, recipient, status, created_at, updated_at)
+        VALUES (1, '${VALID_BURN_TX}', 'testnet', '${VALID_RECIPIENT}', 'succeeded',
+                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      `);
+      legacy.close();
+
+      const s = new Store(path);
+      const existing = s.beginMint(args(1));
+
+      expect(existing.kind).toBe("succeeded");
+      expect(existing.record.direction).toBe("arc->stellar");
+      s.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

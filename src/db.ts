@@ -29,6 +29,7 @@ export interface MintRecord {
   readonly apiKeyId: number;
   readonly burnTxHash: string;
   readonly network: string;
+  readonly direction: string;
   readonly recipient: string;
   readonly status: MintStatus;
   readonly attempts: number;
@@ -55,6 +56,7 @@ interface MintRow {
   api_key_id: number;
   burn_tx_hash: string;
   network: string;
+  direction: string;
   recipient: string;
   status: string;
   attempts: number;
@@ -87,6 +89,7 @@ function toMintRecord(row: MintRow): MintRecord {
     apiKeyId: row.api_key_id,
     burnTxHash: row.burn_tx_hash,
     network: row.network,
+    direction: row.direction,
     recipient: row.recipient,
     status: row.status as MintStatus,
     attempts: row.attempts,
@@ -137,6 +140,7 @@ export class Store {
         api_key_id INTEGER NOT NULL REFERENCES api_keys(id),
         burn_tx_hash TEXT NOT NULL,
         network TEXT NOT NULL,
+        direction TEXT NOT NULL,
         recipient TEXT NOT NULL,
         status TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 1,
@@ -152,6 +156,14 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_mints_key_created
         ON mints (api_key_id, created_at);
     `);
+
+    // A database created before the reverse direction existed has no such column, and
+    // every row in it can only have been Arc to Stellar, so that is the backfill. SQLite
+    // requires a default to add a NOT NULL column to a populated table.
+    const columns = this.db.prepare(`PRAGMA table_info(mints)`).all() as { name: string }[];
+    if (!columns.some((column) => column.name === "direction")) {
+      this.db.exec(`ALTER TABLE mints ADD COLUMN direction TEXT NOT NULL DEFAULT 'arc->stellar'`);
+    }
   }
 
   createApiKey(label: string, dailyMintCap: number | null, rateLimitPerMinute: number): { rawKey: string; record: ApiKeyRecord } {
@@ -254,6 +266,7 @@ export class Store {
     apiKeyId: number;
     burnTxHash: string;
     network: string;
+    direction: string;
     recipient: string;
   }): BeginMintOutcome {
     const now = new Date().toISOString();
@@ -279,10 +292,10 @@ export class Store {
 
       const info = this.db
         .prepare(
-          `INSERT INTO mints (api_key_id, burn_tx_hash, network, recipient, status, attempts, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'in_progress', 1, ?, ?)`,
+          `INSERT INTO mints (api_key_id, burn_tx_hash, network, direction, recipient, status, attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'in_progress', 1, ?, ?)`,
         )
-        .run(args.apiKeyId, args.burnTxHash, args.network, args.recipient, now, now);
+        .run(args.apiKeyId, args.burnTxHash, args.network, args.direction, args.recipient, now, now);
       const inserted = this.db.prepare(`SELECT * FROM mints WHERE id = ?`).get(Number(info.lastInsertRowid)) as MintRow;
       return { kind: "created", record: toMintRecord(inserted) };
     })();

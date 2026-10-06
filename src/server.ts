@@ -25,10 +25,8 @@ import Fastify, {
 import type { ApiKeyRecord } from "./db.js";
 import { Store, hashApiKey } from "./db.js";
 import type { Config } from "./config.js";
-import type { Paymaster } from "./paymaster.js";
+import type { Direction, Paymaster } from "./paymaster.js";
 import type { BalanceSource } from "./balance-monitor.js";
-import type { ServiceSigner } from "./stellar.js";
-import { stroopsToXlm } from "./stellar.js";
 import { PaymasterError, RateLimitedError, UnauthorizedError } from "./errors.js";
 
 /**
@@ -48,23 +46,48 @@ function windowStartSeconds(): number {
   return Math.floor(Date.now() / 1000 / 60) * 60;
 }
 
+/**
+ * One leg of the service, as the probes and the status endpoint report it. The server holds
+ * no knowledge of which chains these are, only how to render whatever a leg says its unit
+ * is, which is what lets the same code report XLM at 7 places and native USDC at 18 without
+ * a branch on either.
+ */
+export interface RouteLeg {
+  readonly direction: Direction;
+  /** The asset this leg spends. Used in probes and status responses. */
+  readonly unit: string;
+  /** The account that pays for this leg, which is also the account being watched. */
+  readonly account: string;
+  readonly monitor: BalanceSource;
+  /** Renders a raw on-chain amount for this leg into a human string. */
+  readonly format: (amount: bigint) => string;
+}
+
 export interface RouteDeps {
   readonly config: Config;
   readonly store: Store;
   readonly paymaster: Paymaster;
-  readonly balanceMonitor: BalanceSource;
-  readonly serviceSigner: ServiceSigner;
+  readonly legs: readonly RouteLeg[];
 }
 
+/**
+ * The body schema rejects only what could never be valid for either direction. The precise
+ * per-direction checks, a 0x-prefixed hash for an Arc burn and a bare one for a Stellar
+ * burn, depend on which direction the request is for, which this schema cannot express, so
+ * they live in Paymaster.validate where the direction has already been resolved. Splitting
+ * the same rule across both places would only give two of them to keep in step.
+ */
 const completeBodySchema = {
   type: "object",
   required: ["burnTxHash", "from", "to", "recipient"],
   additionalProperties: false,
   properties: {
-    burnTxHash: { type: "string", minLength: 66, maxLength: 66 },
+    // 64 hex characters bare on Stellar, 66 with the 0x prefix on Arc.
+    burnTxHash: { type: "string", minLength: 64, maxLength: 66 },
     from: { type: "string" },
     to: { type: "string" },
-    recipient: { type: "string", minLength: 56, maxLength: 56 },
+    // 42 characters for an Arc address, 56 for a Stellar one.
+    recipient: { type: "string", minLength: 42, maxLength: 56 },
     network: { type: "string", enum: ["mainnet", "testnet"] },
   },
 } as const;
@@ -106,7 +129,7 @@ export function createApp(config: Config): FastifyInstance {
 }
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
-  const { config, store, paymaster, balanceMonitor, serviceSigner } = deps;
+  const { config, store, paymaster, legs } = deps;
 
   /** Resolves the caller from the presented key. Throws rather than returning undefined. */
   function authenticate(request: FastifyRequest): ApiKeyRecord {
@@ -163,24 +186,40 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   /**
    * Readiness, as distinct from liveness. Liveness answers whether the process is running,
    * this answers whether it should be sent work. A halted service still answers /healthz
-   * with 200 because the process itself is healthy, and answers /readyz with 503 because
-   * every completion it accepts will be refused.
+   * with 200 because the process itself is healthy, and answers /readyz with 503 only when
+   * it can serve nothing at all.
+   *
+   * Readiness is judged per leg, because a leg is only usable while the account that pays
+   * for it is funded. A service whose XLM has run low can still complete Stellar to Arc
+   * transfers, and reporting that as unready would pull a working capability out of
+   * rotation. So the probe fails only when every leg is down, and when it does not it names
+   * which directions are serviceable so the partial case is visible rather than implied.
    *
    * No balance figure is returned. The endpoint is unauthenticated and a probe needs only
-   * the boolean, so the operational detail stays behind the key on /v1/status.
+   * the verdict, so the amounts stay behind the key on /v1/status.
    */
   app.get("/readyz", async (_request, reply) => {
-    const balance = balanceMonitor.snapshot();
-    if (balance.halted) {
-      return reply.code(503).send({
-        status: "halted",
-        reason:
-          balance.lastError ??
-          "The service XLM balance is at or below the configured floor, or has not been read successfully yet.",
-        lastCheckedAt: balance.lastCheckedAt,
-      });
+    const report = legs.map((leg) => {
+      const snapshot = leg.monitor.snapshot();
+      return { direction: leg.direction, unit: leg.unit, halted: snapshot.halted, lastError: snapshot.lastError };
+    });
+    const directions = Object.fromEntries(report.map((leg) => [leg.direction, leg.halted ? "halted" : "ready"]));
+
+    if (report.every((leg) => leg.halted)) {
+      const reason = report
+        .map(
+          (leg) =>
+            leg.lastError ??
+            `The service ${leg.unit} balance is at or below the configured floor, or has not been read successfully yet.`,
+        )
+        .join(" ");
+      return reply.code(503).send({ status: "halted", reason, directions });
     }
-    return { status: "ready" };
+
+    return {
+      status: report.some((leg) => leg.halted) ? "degraded" : "ready",
+      directions,
+    };
   });
 
   app.post(
@@ -213,20 +252,24 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.get("/v1/status", async (request) => {
     const apiKey = authenticate(request);
-    const balance = balanceMonitor.snapshot();
     const startOfDay = new Date();
     startOfDay.setUTCHours(0, 0, 0, 0);
 
     return {
       network: config.network,
-      serviceSigner: serviceSigner.publicKey,
-      balance: {
-        xlm: balance.stroops === null ? null : stroopsToXlm(balance.stroops),
-        floorXlm: stroopsToXlm(balance.floorStroops),
-        halted: balance.halted,
-        lastCheckedAt: balance.lastCheckedAt,
-        lastError: balance.lastError,
-      },
+      legs: legs.map((leg) => {
+        const snapshot = leg.monitor.snapshot();
+        return {
+          direction: leg.direction,
+          unit: leg.unit,
+          account: leg.account,
+          balance: snapshot.amount === null ? null : leg.format(snapshot.amount),
+          floor: leg.format(snapshot.floor),
+          halted: snapshot.halted,
+          lastCheckedAt: snapshot.lastCheckedAt,
+          lastError: snapshot.lastError,
+        };
+      }),
       usage: {
         mintsToday: store.countBillableMintsSince(apiKey.id, startOfDay.toISOString()),
         dailyMintCap: apiKey.dailyMintCap,

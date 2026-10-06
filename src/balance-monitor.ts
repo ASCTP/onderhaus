@@ -1,22 +1,25 @@
 /**
- * Watches the service's own XLM balance and raises a halt when it falls below the
- * configured floor.
+ * Watches one of the service's funded accounts and raises a halt when its balance falls
+ * below the configured floor.
+ *
+ * The monitor knows nothing about which chain it is watching. It is handed a reader and a
+ * floor, and the two instances the service runs differ only in those: XLM from Horizon on
+ * one side, native USDC from Arc's RPC on the other. Keeping the chain out of here is what
+ * lets the same halt logic, including the fail-closed start, cover both.
  *
  * The halt fails closed. Until the first successful balance read the service reports
- * itself halted, so a misconfigured or unreachable Horizon cannot produce a service that
+ * itself halted, so a misconfigured or unreachable endpoint cannot produce a service that
  * happily spends from an account it has never confirmed holds anything. Once a read has
  * succeeded, a later transient read failure keeps the previous verdict rather than
  * flipping the service to halted on a single blip, and the failure is recorded in the
  * snapshot so an operator can see the reading is stale.
  */
 
-import type { Network } from "./config.js";
 import type { Logger } from "./logger.js";
-import { fetchXlmBalanceStroops } from "./stellar.js";
 
 export interface BalanceSnapshot {
-  readonly stroops: bigint | null;
-  readonly floorStroops: bigint;
+  readonly amount: bigint | null;
+  readonly floor: bigint;
   readonly halted: boolean;
   readonly lastCheckedAt: string | null;
   readonly lastError: string | null;
@@ -31,20 +34,20 @@ export interface BalanceSource {
 }
 
 export interface BalanceMonitorOptions {
-  readonly publicKey: string;
-  readonly network: Network;
-  readonly floorStroops: bigint;
+  /** The account being watched, used in log lines so an operator knows which one is low. */
+  readonly account: string;
+  /** The asset this account spends, "XLM" or "USDC". Used in log lines only. */
+  readonly unit: string;
+  readonly floor: bigint;
   readonly pollMs: number;
   readonly logger: Logger;
-  readonly fetchImpl?: typeof fetch;
+  readonly read: () => Promise<bigint>;
 }
-
-const FETCH_TIMEOUT_MS = 10_000;
 
 export class BalanceMonitor implements BalanceSource {
   private readonly options: BalanceMonitorOptions;
   private timer: NodeJS.Timeout | undefined;
-  private stroops: bigint | null = null;
+  private amount: bigint | null = null;
   private halted = true;
   private hasReadOnce = false;
   private lastCheckedAt: string | null = null;
@@ -60,8 +63,12 @@ export class BalanceMonitor implements BalanceSource {
     // and an operator reading the log should not have to infer it from the absence of a
     // resumption message.
     this.options.logger.info(
-      { publicKey: this.options.publicKey, floorStroops: this.options.floorStroops.toString() },
-      "the service starts halted and refuses to complete transfers until the first XLM balance read succeeds",
+      {
+        account: this.options.account,
+        unit: this.options.unit,
+        floor: this.options.floor.toString(),
+      },
+      `the service starts halted for ${this.options.unit} and refuses to complete transfers until the first balance read succeeds`,
     );
     void this.poll();
     this.timer = setInterval(() => void this.poll(), this.options.pollMs);
@@ -78,8 +85,8 @@ export class BalanceMonitor implements BalanceSource {
 
   snapshot(): BalanceSnapshot {
     return {
-      stroops: this.stroops,
-      floorStroops: this.options.floorStroops,
+      amount: this.amount,
+      floor: this.options.floor,
       halted: this.halted,
       lastCheckedAt: this.lastCheckedAt,
       lastError: this.lastError,
@@ -88,42 +95,32 @@ export class BalanceMonitor implements BalanceSource {
 
   /** Reads the balance once and folds the result into the halt state. Exposed for tests. */
   async poll(): Promise<void> {
-    const { publicKey, network, floorStroops, logger, fetchImpl } = this.options;
+    const { account, unit, floor, logger, read } = this.options;
     try {
-      const balance = await fetchXlmBalanceStroops(publicKey, network, fetchImpl ?? fetchWithTimeout);
+      const balance = await read();
       const wasHalted = this.halted;
       const isFirstRead = !this.hasReadOnce;
-      this.stroops = balance;
-      this.halted = balance < floorStroops;
+      this.amount = balance;
+      this.halted = balance < floor;
       this.lastCheckedAt = new Date().toISOString();
       this.lastError = null;
       this.hasReadOnce = true;
 
-      const fields = { balanceStroops: balance.toString(), floorStroops: floorStroops.toString() };
+      const fields = { account, unit, balance: balance.toString(), floor: floor.toString() };
       // Logging normally waits for a transition, but the first read always reports its
       // verdict. A service that boots below its floor begins halted and never transitions
       // into that state, so without this the anomalous case is the quiet one.
       if (this.halted) {
         if (isFirstRead || !wasHalted) {
-          logger.error(fields, "service XLM balance is below the floor, completing transfers is halted");
+          logger.error(fields, `service ${unit} balance is below the floor, completing transfers is halted`);
         }
       } else if (isFirstRead || wasHalted) {
-        logger.info(fields, "service XLM balance is above the floor, completing transfers are enabled");
+        logger.info(fields, `service ${unit} balance is above the floor, completing transfers are enabled`);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.lastError = message;
-      logger.warn({ err: message }, "could not read the service XLM balance");
+      logger.warn({ account, unit, err: message }, `could not read the service ${unit} balance`);
     }
-  }
-}
-
-async function fetchWithTimeout(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
   }
 }

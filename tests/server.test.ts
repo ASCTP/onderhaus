@@ -1,13 +1,29 @@
 /**
  * Covers the HTTP contract: that every spending endpoint requires a key, and that each
  * error class reaches the caller with the right status and a machine-readable code.
+ *
+ * The reverse direction is opt-in here the same way it is in production, by whether an Arc
+ * account was configured at all, so both shapes of the deployment get exercised: a service
+ * offering one direction and a service offering two.
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { createApp, registerRoutes } from "../src/server.js";
+import { createApp, registerRoutes, type RouteLeg } from "../src/server.js";
 import { Store } from "../src/db.js";
 import { Paymaster, type PaymasterDeps } from "../src/paymaster.js";
-import { VALID_BURN_TX, VALID_RECIPIENT, balanceOf, silentLogger, testConfig, testSigner } from "./helpers.js";
+import { stroopsToXlm } from "../src/stellar.js";
+import { weiToUsdc } from "../src/arc.js";
+import {
+  VALID_BURN_TX,
+  VALID_EVM_RECIPIENT,
+  VALID_RECIPIENT,
+  VALID_STELLAR_BURN_TX,
+  balanceOf,
+  silentLogger,
+  testArcSigner,
+  testConfig,
+  testSigner,
+} from "./helpers.js";
 
 const READY = { exists: true, hasTrustline: true, ready: true };
 const NO_TRUSTLINE = { exists: true, hasTrustline: false, ready: false };
@@ -19,6 +35,8 @@ async function buildApp(
     keyRateLimit?: number;
     ipRateLimit?: number;
     halted?: boolean;
+    arc?: boolean;
+    arcHalted?: boolean;
   } = {},
 ) {
   const config = testConfig({
@@ -28,6 +46,33 @@ async function buildApp(
   const store = new Store(":memory:");
   const { rawKey } = store.createApiKey("test", null, options.keyRateLimit ?? 60);
   const balanceMonitor = balanceOf(options.halted ?? false);
+  const stellarSigner = testSigner();
+
+  const legs: RouteLeg[] = [
+    {
+      direction: "arc->stellar",
+      unit: "XLM",
+      account: stellarSigner.publicKey,
+      monitor: balanceMonitor,
+      format: stroopsToXlm,
+    },
+  ];
+
+  const arcServiceSigner = options.arc ? testArcSigner() : undefined;
+  // Native USDC on Arc is an 18-decimal figure, unlike the 6-decimal ERC-20 that CCTP
+  // moves, so the fixture is scaled to match what the chain actually reports.
+  const arcBalanceMonitor = options.arc
+    ? balanceOf(options.arcHalted ?? false, 20n * 10n ** 18n, 10n ** 18n)
+    : undefined;
+  if (arcServiceSigner && arcBalanceMonitor) {
+    legs.push({
+      direction: "stellar->arc",
+      unit: "USDC",
+      account: arcServiceSigner.address,
+      monitor: arcBalanceMonitor,
+      format: (wei) => weiToUsdc(wei, config.network),
+    });
+  }
 
   const completeMint = vi
     .fn()
@@ -37,21 +82,17 @@ async function buildApp(
   const paymaster = new Paymaster({
     config,
     store,
-    serviceSigner: testSigner(),
+    serviceSigner: stellarSigner,
     balanceMonitor,
+    arcServiceSigner,
+    arcBalanceMonitor,
     logger: silentLogger(),
     completeMintImpl: (options.completeMint ?? completeMint) as unknown as PaymasterDeps["completeMintImpl"],
     checkRecipientReadyImpl: checkRecipient as unknown as PaymasterDeps["checkRecipientReadyImpl"],
   });
 
   const app = createApp(config);
-  registerRoutes(app, {
-    config,
-    store,
-    paymaster,
-    balanceMonitor,
-    serviceSigner: testSigner(),
-  });
+  registerRoutes(app, { config, store, paymaster, legs });
   await app.ready();
   return { app, rawKey, store, completeMint };
 }
@@ -61,6 +102,13 @@ const validBody = {
   from: "arc",
   to: "stellar",
   recipient: VALID_RECIPIENT,
+};
+
+const validReverseBody = {
+  burnTxHash: VALID_STELLAR_BURN_TX,
+  from: "stellar",
+  to: "arc",
+  recipient: VALID_EVM_RECIPIENT,
 };
 
 describe("GET /healthz", () => {
@@ -85,7 +133,7 @@ describe("GET /readyz", () => {
     const { app } = await buildApp();
     const response = await app.inject({ method: "GET", url: "/readyz" });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ status: "ready" });
+    expect(response.json()).toEqual({ status: "ready", directions: { "arc->stellar": "ready" } });
     await app.close();
   });
 
@@ -97,11 +145,32 @@ describe("GET /readyz", () => {
     await app.close();
   });
 
-  it("does not disclose the balance figure to an unauthenticated caller", async () => {
-    const { app } = await buildApp();
+  it("reports degraded rather than unready when only one leg is down", async () => {
+    const { app } = await buildApp({ arc: true, halted: true });
     const response = await app.inject({ method: "GET", url: "/readyz" });
-    expect(response.body).not.toContain("stroops");
-    expect(JSON.stringify(response.json())).not.toContain("balanceStroops");
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      status: "degraded",
+      directions: { "arc->stellar": "halted", "stellar->arc": "ready" },
+    });
+    await app.close();
+  });
+
+  it("refuses traffic only once every leg is down", async () => {
+    const { app } = await buildApp({ arc: true, halted: true, arcHalted: true });
+    const response = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json().directions).toEqual({ "arc->stellar": "halted", "stellar->arc": "halted" });
+    await app.close();
+  });
+
+  it("does not disclose the balance figure to an unauthenticated caller", async () => {
+    const { app } = await buildApp({ arc: true });
+    const response = await app.inject({ method: "GET", url: "/readyz" });
+    expect(response.body).not.toContain("balance");
+    expect(response.body).not.toContain("10.0000000");
     await app.close();
   });
 });
@@ -208,6 +277,48 @@ describe("POST /v1/complete", () => {
     expect(response.json().error.code).toBe("validation_error");
     await app.close();
   });
+
+  it("reports a direction this deployment cannot serve as 501", async () => {
+    const { app, rawKey } = await buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/complete",
+      payload: validReverseBody,
+      headers: { authorization: `Bearer ${rawKey}` },
+    });
+
+    // Not a validation error: the request is well formed and a deployment holding an Arc
+    // key would have served it, so the caller is told the capability is absent.
+    expect(response.statusCode).toBe(501);
+    expect(response.json().error).toMatchObject({ code: "direction_unavailable", retryable: false });
+    await app.close();
+  });
+
+  it("completes a Stellar to Arc transfer when the Arc account is configured", async () => {
+    const { app, rawKey } = await buildApp({ arc: true });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/complete",
+      payload: validReverseBody,
+      headers: { authorization: `Bearer ${rawKey}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().replayed).toBe(false);
+    await app.close();
+  });
+
+  it("rejects a 64 character hash, which only a Stellar burn can be", async () => {
+    const { app, rawKey } = await buildApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/complete",
+      payload: { ...validBody, burnTxHash: VALID_STELLAR_BURN_TX },
+      headers: { authorization: `Bearer ${rawKey}` },
+    });
+    expect(response.statusCode).toBe(400);
+    await app.close();
+  });
 });
 
 describe("rate limiting", () => {
@@ -276,8 +387,30 @@ describe("GET /v1/status", () => {
     const body = response.json();
     expect(response.statusCode).toBe(200);
     expect(body.network).toBe("testnet");
-    expect(body.balance.halted).toBe(false);
+    expect(body.legs).toHaveLength(1);
+    expect(body.legs[0]).toMatchObject({ direction: "arc->stellar", unit: "XLM", halted: false });
     expect(body.usage.mintsToday).toBe(0);
+    await app.close();
+  });
+
+  it("reports both legs when the reverse direction is configured", async () => {
+    const { app, rawKey } = await buildApp({ arc: true });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/status",
+      headers: { authorization: `Bearer ${rawKey}` },
+    });
+    const body = response.json();
+
+    expect(body.legs.map((leg: { direction: string }) => leg.direction)).toEqual(["arc->stellar", "stellar->arc"]);
+    // Each leg renders its own chain's amount at that chain's scale, which is the reason
+    // the leg carries a formatter rather than the server knowing about either asset.
+    expect(body.legs[0].balance).toBe("10.0000000");
+    expect(body.legs[1]).toMatchObject({
+      unit: "USDC",
+      balance: "20.000000000000000000",
+      floor: "1.000000000000000000",
+    });
     await app.close();
   });
 });

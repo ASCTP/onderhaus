@@ -7,6 +7,9 @@
  * account they expect without exposing the key itself.
  */
 
+import { AmountFormatError, parseFixed } from "./amounts.js";
+import { arcNativeDecimals } from "./arc.js";
+
 export type Network = "mainnet" | "testnet";
 
 export interface Config {
@@ -15,9 +18,18 @@ export interface Config {
   readonly network: Network;
   readonly stellarSecretKey: string;
   readonly stellarRpcUrl: string | undefined;
+  /**
+   * Absent when the service is not configured for the reverse direction. Its presence is
+   * what turns Phase 2 on, so an operator running Arc to Stellar only is never forced to
+   * hold a second hot key.
+   */
+  readonly arcSecretKey: string | undefined;
+  readonly arcRpcUrl: string | undefined;
   readonly databasePath: string;
   readonly xlmLowBalanceFloorStroops: bigint;
   readonly xlmBalancePollMs: number;
+  readonly usdcLowBalanceFloorWei: bigint;
+  readonly usdcBalancePollMs: number;
   readonly defaultRateLimitPerMinute: number;
   readonly ipRateLimitPerMinute: number;
   readonly attestationPollIntervalMs: number;
@@ -26,7 +38,7 @@ export interface Config {
   readonly trustProxy: boolean;
 }
 
-const STROOPS_PER_XLM = 10_000_000n;
+const STROOPS_DECIMALS = 7;
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -67,15 +79,39 @@ function boolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boole
  * a floor comparison against an on-chain balance never depends on float rounding.
  */
 export function xlmToStroops(amount: string): bigint {
-  const trimmed = amount.trim();
-  if (!/^\d+(\.\d{1,7})?$/.test(trimmed)) {
-    throw new ConfigError(`XLM amount must be a decimal with at most 7 places, got ${JSON.stringify(amount)}`);
+  return asConfigError(() => parseFixed(amount, STROOPS_DECIMALS, "XLM amount"));
+}
+
+/**
+ * Converts a human USDC amount into wei, which is the scale Arc reports its native gas
+ * token at. The floor is expressed this way because the service spends native USDC on Arc
+ * gas, not the 6-decimal ERC-20 that CCTP moves.
+ */
+export function usdcToWei(amount: string, network: Network): bigint {
+  return asConfigError(() => parseFixed(amount, arcNativeDecimals(network), "USDC amount"));
+}
+
+/**
+ * The amount helpers report their own error type, since they also render figures read back
+ * from a chain. Only here, where the value came from the environment, is a malformed
+ * number a configuration problem.
+ */
+function asConfigError(convert: () => bigint): bigint {
+  try {
+    return convert();
+  } catch (err) {
+    if (err instanceof AmountFormatError) throw new ConfigError(err.message);
+    throw err;
   }
-  const parts = trimmed.split(".");
-  const whole = parts[0] ?? "0";
-  const fraction = parts[1] ?? "";
-  const paddedFraction = fraction.padEnd(7, "0");
-  return BigInt(whole) * STROOPS_PER_XLM + BigInt(paddedFraction);
+}
+
+function optionalEvmPrivateKey(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const raw = env[name]?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(raw)) {
+    throw new ConfigError(`${name} must be a 0x-prefixed 32 byte private key`);
+  }
+  return raw;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -94,6 +130,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   const floor = env.XLM_LOW_BALANCE_FLOOR?.trim() || "5";
+  const usdcFloor = env.USDC_LOW_BALANCE_FLOOR?.trim() || "1";
+  const arcSecretKey = optionalEvmPrivateKey(env, "ARC_SECRET_KEY");
 
   return {
     host: env.HOST?.trim() || "127.0.0.1",
@@ -101,9 +139,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     network: rawNetwork,
     stellarSecretKey,
     stellarRpcUrl: env.STELLAR_RPC_URL?.trim() || undefined,
+    arcSecretKey,
+    arcRpcUrl: env.ARC_RPC_URL?.trim() || undefined,
     databasePath: env.DATABASE_PATH?.trim() || "onderhaus.db",
     xlmLowBalanceFloorStroops: xlmToStroops(floor),
     xlmBalancePollMs: integer(env, "XLM_BALANCE_POLL_MS", 60_000),
+    usdcLowBalanceFloorWei: usdcToWei(usdcFloor, rawNetwork),
+    usdcBalancePollMs: integer(env, "USDC_BALANCE_POLL_MS", 60_000),
     defaultRateLimitPerMinute: integer(env, "DEFAULT_RATE_LIMIT_PER_MINUTE", 60),
     ipRateLimitPerMinute: integer(env, "IP_RATE_LIMIT_PER_MINUTE", 600),
     attestationPollIntervalMs: integer(env, "ATTESTATION_POLL_INTERVAL_MS", 3_000),

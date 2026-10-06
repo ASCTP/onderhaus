@@ -15,8 +15,11 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import type { StellarSigner } from "@asctp/parabola";
 import { STELLAR_MAINNET, STELLAR_TESTNET } from "@asctp/parabola";
+import { formatFixed } from "./amounts.js";
 import type { Network } from "./config.js";
 import { UpstreamError } from "./errors.js";
+
+const FETCH_TIMEOUT_MS = 10_000;
 
 export interface ServiceSigner {
   readonly signer: StellarSigner;
@@ -49,7 +52,7 @@ export function horizonUrlFor(network: Network): string {
 export async function fetchXlmBalanceStroops(
   publicKey: string,
   network: Network,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchWithTimeout,
 ): Promise<bigint> {
   const url = `${horizonUrlFor(network)}/accounts/${publicKey}`;
   let response: Response;
@@ -91,9 +94,20 @@ export function decimalToStroops(amount: string): bigint {
 
 /** Renders stroops as a human XLM string, for status responses and log lines. */
 export function stroopsToXlm(stroops: bigint): string {
-  const negative = stroops < 0n;
-  const absolute = negative ? -stroops : stroops;
-  const whole = absolute / 10_000_000n;
-  const fraction = (absolute % 10_000_000n).toString().padStart(7, "0");
-  return `${negative ? "-" : ""}${whole}.${fraction}`;
+  return formatFixed(stroops, 7);
+}
+
+/**
+ * A fetch that gives up rather than hanging. A balance poll that never resolves would
+ * leave the halt state frozen at whatever it last was, which fails open in the one place
+ * that must not.
+ */
+export async function fetchWithTimeout(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }

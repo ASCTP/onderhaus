@@ -83,6 +83,18 @@ export class BalanceHaltError extends PaymasterError {
   }
 }
 
+/**
+ * A direction this service knows how to complete, on a deployment that was not given the
+ * account which pays for it. Deliberately not a validation error, since the request was
+ * well formed and the caller did nothing wrong: the same request would be served by a
+ * deployment holding a second funded key.
+ */
+export class DirectionUnavailableError extends PaymasterError {
+  constructor(message: string) {
+    super(message, 501, "direction_unavailable");
+  }
+}
+
 export class UpstreamError extends PaymasterError {
   constructor(message: string) {
     super(message, 502, "upstream_error", true);
