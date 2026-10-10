@@ -203,7 +203,9 @@ and both are the path once there is volume worth the audit.
 ## Security posture
 
 This service custodies hot, funded keys on two chains and spends real money on request.
-Running it means accepting that.
+Running it means accepting that. Its answer to that risk is a single rule that the whole
+request path is built around. The engine works hard to say no before it ever says pay, and
+every control below serves that order.
 
 - **API keys are required on every spending endpoint.** There is no unauthenticated
   completion path. Only the two probes are open, and they reveal nothing beyond liveness
