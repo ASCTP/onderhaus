@@ -9,13 +9,15 @@ export class PaymasterError extends Error {
   readonly status: number;
   readonly code: string;
   readonly retryable: boolean;
+  readonly txHash?: string;
 
-  constructor(message: string, status: number, code: string, retryable = false) {
+  constructor(message: string, status: number, code: string, retryable = false, txHash?: string) {
     super(message);
     this.name = new.target.name;
     this.status = status;
     this.code = code;
     this.retryable = retryable;
+    if (txHash !== undefined) this.txHash = txHash;
   }
 }
 
@@ -96,7 +98,7 @@ export class DirectionUnavailableError extends PaymasterError {
 }
 
 export class UpstreamError extends PaymasterError {
-  constructor(message: string) {
-    super(message, 502, "upstream_error", true);
+  constructor(message: string, txHash?: string) {
+    super(message, 502, "upstream_error", true, txHash);
   }
 }

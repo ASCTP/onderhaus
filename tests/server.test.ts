@@ -128,12 +128,30 @@ describe("GET /healthz", () => {
   });
 });
 
+describe("CORS", () => {
+  it("allows any origin so a browser integrator needs no per-origin setup", async () => {
+    const { app } = await buildApp();
+    const response = await app.inject({ method: "GET", url: "/healthz" });
+    expect(response.headers["access-control-allow-origin"]).toBe("*");
+    await app.close();
+  });
+
+  it("answers a preflight with 204 and the allowed methods and headers", async () => {
+    const { app } = await buildApp();
+    const response = await app.inject({ method: "OPTIONS", url: "/v1/complete" });
+    expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe("*");
+    expect(response.headers["access-control-allow-headers"]).toContain("authorization");
+    await app.close();
+  });
+});
+
 describe("GET /readyz", () => {
   it("answers ready without a key while the service can complete transfers", async () => {
     const { app } = await buildApp();
     const response = await app.inject({ method: "GET", url: "/readyz" });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ status: "ready", directions: { "arc->stellar": "ready" } });
+    expect(response.json()).toEqual({ status: "ready", network: "testnet", directions: { "arc->stellar": "ready" } });
     await app.close();
   });
 
@@ -152,6 +170,7 @@ describe("GET /readyz", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       status: "degraded",
+      network: "testnet",
       directions: { "arc->stellar": "halted", "stellar->arc": "ready" },
     });
     await app.close();

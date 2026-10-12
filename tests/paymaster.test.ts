@@ -190,6 +190,8 @@ describe("Paymaster.complete", () => {
     expect(error).toBeInstanceOf(UpstreamError);
     expect((error as UpstreamError).message).toContain("stellar-tx-hash");
     expect((error as UpstreamError).message).toContain("may still land");
+    // The hash is also a structured field, so a caller acts on it without parsing the message.
+    expect((error as UpstreamError).txHash).toBe("stellar-tx-hash");
   });
 
   it("reports an unrecognised upstream failure without matching it to attestation", async () => {

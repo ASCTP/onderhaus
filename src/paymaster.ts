@@ -185,6 +185,7 @@ export class Paymaster {
       if (err instanceof SubmissionTimeoutError) {
         throw new UpstreamError(
           `The completion transaction was broadcast as ${err.hash} but confirmation did not arrive in time. It may still land; check that hash before retrying.`,
+          err.hash,
         );
       }
       if (err instanceof Error && ATTESTATION_MESSAGE.test(err.message)) {

@@ -149,9 +149,14 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof PaymasterError) {
-      return reply
-        .code(error.status)
-        .send({ error: { code: error.code, message: error.message, retryable: error.retryable } });
+      return reply.code(error.status).send({
+        error: {
+          code: error.code,
+          message: error.message,
+          retryable: error.retryable,
+          ...(error.txHash !== undefined ? { txHash: error.txHash } : {}),
+        },
+      });
     }
     if (error.validation) {
       return reply.code(400).send({
@@ -166,6 +171,23 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return reply
       .code(500)
       .send({ error: { code: "internal_error", message: "An unexpected error occurred.", retryable: false } });
+  });
+
+  // Allow any origin. The API authenticates with a bearer token in a header, not a cookie,
+  // so a cross-origin call is uncredentialed in CORS terms and a wildcard exposes nothing a
+  // caller could not already reach server to server. A per-origin allow-list is deliberately
+  // avoided because it would force every browser integrator to be added by hand. Registered
+  // before the rate limiter so a preflight is answered without being charged to an address.
+  app.addHook("onRequest", async (request, reply) => {
+    reply.header("access-control-allow-origin", "*");
+    if (request.method === "OPTIONS") {
+      await reply
+        .header("access-control-allow-methods", "GET, POST, OPTIONS")
+        .header("access-control-allow-headers", "authorization, content-type, x-api-key")
+        .header("access-control-max-age", "86400")
+        .code(204)
+        .send();
+    }
   });
 
   // Registered as an onRequest hook because onRequest runs before schema validation and
@@ -213,11 +235,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
             `The service ${leg.unit} balance is at or below the configured floor, or has not been read successfully yet.`,
         )
         .join(" ");
-      return reply.code(503).send({ status: "halted", reason, directions });
+      return reply.code(503).send({ status: "halted", network: config.network, reason, directions });
     }
 
     return {
       status: report.some((leg) => leg.halted) ? "degraded" : "ready",
+      network: config.network,
       directions,
     };
   });

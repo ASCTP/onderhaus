@@ -73,11 +73,31 @@ account that pays for a direction and found it above that direction's floor. Tha
 deliberate, so a misconfigured or unreachable Horizon ends in a refusal rather than in
 spending from an account whose balance was never confirmed.
 
+### Funding the accounts on testnet
+
+The service halts until each paying account is funded, so a fresh checkout needs funded
+accounts before `/readyz` reports ready.
+
+- The Stellar account named by `STELLAR_SECRET_KEY` needs testnet XLM. Stellar's Friendbot
+  funds a testnet account: `curl "https://friendbot.stellar.org/?addr=<G...public key>"`.
+- The Arc account named by `ARC_SECRET_KEY`, only for the reverse direction, needs testnet
+  Arc gas, which is native USDC. There is no Friendbot equivalent for Arc, so obtain testnet
+  funds for that account from the Arc testnet faucet or provider you use.
+
+### Preparing a test recipient on Stellar
+
+Only Stellar-destination transfers need a prepared recipient; an Arc address needs nothing.
+A Stellar recipient must exist on-ledger and hold a USDC trustline, both signed for by the
+recipient, not by this service. For a test account, fund it with Friendbot as above to
+activate it, then have that account add a USDC trustline with a `change_trust` operation for
+the testnet USDC asset. Until both are done, `/v1/complete` refuses that recipient with 422
+`recipient_not_ready` and spends nothing.
+
 Check whether it considers itself able to work:
 
 ```bash
 curl -s localhost:3000/healthz   # {"status":"ok"}
-curl -s localhost:3000/readyz    # {"status":"ready","directions":{...}}, or 503 when nothing works
+curl -s localhost:3000/readyz    # see the shape below, or 503 when nothing works
 curl -s localhost:3000/v1/status -H "Authorization: Bearer $ONDERHAUS_KEY"
 ```
 
@@ -87,6 +107,50 @@ answers `ready` when every configured direction is funded, `degraded` when some 
 are not, and 503 `halted` only when the service can serve nothing at all. Both probes answer
 without a key, and neither returns a balance figure, which stays behind the key on
 `/v1/status`.
+
+`/readyz` returns the network the instance serves and a `directions` object naming each
+direction and whether it is ready, so a client can tell up front which network and which
+legs it can use without provoking a 400:
+
+```json
+{
+  "status": "degraded",
+  "network": "testnet",
+  "directions": { "arc->stellar": "ready", "stellar->arc": "halted" }
+}
+```
+
+The 503 body carries the same `status`, `network`, and `directions` fields plus a `reason`
+string.
+
+## Producing the burn to complete
+
+Onderhaus only finishes a transfer. The integrating app produces the input, the `burnTxHash`,
+by burning through CCTP with Parabola first. The one requirement is to leave the completion
+open: call Parabola's `transfer()` without a `destinationSigner`, so the SDK burns on the
+source chain, stops, and returns `status: "pending"` with the `burnTxHash` to hand on.
+
+```ts
+import { transfer } from "@asctp/parabola";
+
+// signer is a source-chain signer built the way Parabola's own README shows: a StellarSigner
+// from a Keypair when burning on Stellar, an ArcSigner wrapping a viem WalletClient on Arc.
+const result = await transfer({
+  from: "arc",
+  to: "stellar",
+  amount: "1.0",
+  recipient: "GBZX...the Stellar recipient...",
+  speed: "standard",
+  signer,
+  network: "testnet",
+  // No options.destinationSigner, so the SDK leaves the mint for Onderhaus.
+});
+
+// result.status === "pending", result.burnTxHash is what you send to /v1/complete.
+```
+
+Pass `result.burnTxHash` and the same `recipient` to `/v1/complete`. Signer construction is
+Parabola's surface rather than this service's, so see the Parabola README for it.
 
 ## Completing a transfer
 
@@ -104,8 +168,12 @@ curl -s localhost:3000/v1/complete \
 ```
 
 The `recipient` field is required. The app that initiated the burn already holds the address it
-encoded, so it passes that back. The service uses the value to confirm the account can receive
-USDC before it spends anything.
+encoded, so it passes that back. The value is advisory. The service reads the true recipient out
+of the burn message and pays that address regardless, so the field cannot redirect funds. It is
+used only to confirm the destination can receive before spending. If it disagrees with the
+address in the burn, the effect is a wasted or refused attempt, never a payment to the wrong
+account: on Arc to Stellar a stale `recipient` can cause a false `recipient_not_ready`, and on
+Stellar to Arc the field only lands on the ledger and does not gate spending at all.
 
 A successful completion returns the destination transaction hash:
 
@@ -113,8 +181,12 @@ A successful completion returns the destination transaction hash:
 { "mintTxHash": "...", "attestationHash": "...", "replayed": false }
 ```
 
-If the same `burnTxHash` is submitted again by the same key, the service returns the
-recorded result with `replayed: true` rather than submitting a second time.
+If the same `burnTxHash` is submitted again by the same key on the same network, the service
+returns the recorded result with `replayed: true` rather than submitting a second time.
+Idempotency is keyed on the API key, the burn hash, and the network together, so the same burn
+presented under a different key is not deduplicated against the first, which matters only for a
+caller fronting several keys. A burn whose earlier attempt failed is not treated as done; it
+can be retried and will be submitted again.
 
 ### The reverse direction
 
@@ -157,10 +229,40 @@ hot key.
 | 503 | `insufficient_service_balance` | The account that pays for this direction is below its floor, or its balance is unconfirmed. |
 
 A 502 caused by a submission timeout is the one case where the outcome is genuinely
-unknown. The transaction was broadcast and may still land, so the message contains the
-transaction hash and the caller should check it before retrying. Retrying is not dangerous,
-because CCTP rejects a message that has already been used, but it costs another fee to find
-that out.
+unknown. The transaction was broadcast and may still land, so the caller should check it
+before retrying. Retrying is not dangerous, because CCTP rejects a message that has already
+been used, but it costs another fee to find that out.
+
+Every error shares one envelope. The body is an `error` object carrying the `code` from the
+table, a human `message`, and a `retryable` boolean a client can branch on directly instead
+of maintaining its own list of which codes are safe to repeat:
+
+```json
+{ "error": { "code": "attestation_pending", "message": "Circle has not attested burn ... yet. Retry the same request in a few seconds.", "retryable": true } }
+```
+
+On the submission-timeout 502, and only there, the object also carries a `txHash` field with
+the broadcast transaction's hash, so a caller can check that transaction without parsing it
+out of the message:
+
+```json
+{ "error": { "code": "upstream_error", "message": "The completion transaction was broadcast as 0x... but confirmation did not arrive in time. It may still land; check that hash before retrying.", "retryable": true, "txHash": "0x..." } }
+```
+
+### Calling from a browser
+
+The API key is a bearer secret that can spend the service's funds, so the primary integration
+path is server to server, with the key held on a backend and never shipped to a browser. A
+frontend that needs completions should call its own backend, which holds the key and calls
+Onderhaus. There is no scoped or publishable key today, so a key placed in client code is a
+spendable secret exposed to every visitor.
+
+For the browser cases that are safe, such as reading the probes, the service returns
+`Access-Control-Allow-Origin: *`. Because the key travels in the `Authorization` header rather
+than a cookie, a cross-origin request is uncredentialed in CORS terms, so the wildcard exposes
+nothing a caller could not already reach, and no integrator has to be added to an allow-list by
+hand. A browser request blocked for any other reason surfaces as a generic `TypeError: Failed
+to fetch`, which a client cannot tell apart from the host being down.
 
 ## Scope
 
