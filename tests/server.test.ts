@@ -434,6 +434,108 @@ describe("GET /v1/status", () => {
   });
 });
 
+describe("public dashboard API", () => {
+  it("serves protocol statistics without a key", async () => {
+    const { app } = await buildApp();
+    const response = await app.inject({ method: "GET", url: "/v1/public/stats" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      network: "testnet",
+      totals: { transfers: 0, succeeded: 0, failed: 0, inProgress: 0 },
+      successRate: null,
+      relayers: { active: 0 },
+    });
+    await app.close();
+  });
+
+  it("lists, filters, and pages imported transfers without a key", async () => {
+    const { app, store } = await buildApp();
+    store.importTransferEvent({
+      burnTxHash: VALID_BURN_TX,
+      network: "testnet",
+      direction: "arc->stellar",
+      recipient: VALID_RECIPIENT,
+      amount: "10",
+      status: "succeeded",
+      submittedAt: "2026-10-01T10:00:00.000Z",
+      settledAt: "2026-10-01T10:00:05.000Z",
+      relayer: "relayer-a",
+    });
+    store.importTransferEvent({
+      burnTxHash: VALID_STELLAR_BURN_TX,
+      network: "testnet",
+      direction: "stellar->arc",
+      recipient: VALID_EVM_RECIPIENT,
+      amount: "5",
+      status: "failed",
+      submittedAt: "2026-10-02T10:00:00.000Z",
+    });
+
+    const all = await app.inject({ method: "GET", url: "/v1/public/transfers" });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().total).toBe(2);
+    expect(all.json().transfers[0].burnTxHash).toBe(VALID_STELLAR_BURN_TX);
+
+    const filtered = await app.inject({ method: "GET", url: "/v1/public/transfers?direction=arc-%3Estellar" });
+    expect(filtered.json().total).toBe(1);
+
+    const failed = await app.inject({ method: "GET", url: "/v1/public/transfers?status=failed&limit=1" });
+    expect(failed.json()).toMatchObject({ total: 1, limit: 1, offset: 0 });
+    expect(failed.json().transfers).toHaveLength(1);
+    await app.close();
+  });
+
+  it("returns one transfer by burn hash and answers 404 when it is unknown", async () => {
+    const { app, store } = await buildApp();
+    store.importTransferEvent({
+      burnTxHash: VALID_BURN_TX,
+      network: "testnet",
+      direction: "arc->stellar",
+      recipient: VALID_RECIPIENT,
+      status: "succeeded",
+      submittedAt: "2026-10-01T10:00:00.000Z",
+    });
+
+    const found = await app.inject({ method: "GET", url: `/v1/public/transfers/${VALID_BURN_TX}` });
+    expect(found.statusCode).toBe(200);
+    expect(found.json().burnTxHash).toBe(VALID_BURN_TX);
+
+    const missing = await app.inject({ method: "GET", url: `/v1/public/transfers/${"00".repeat(32)}` });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe("not_found");
+    await app.close();
+  });
+
+  it("rejects an unknown query parameter rather than ignoring it", async () => {
+    const { app } = await buildApp();
+    const response = await app.inject({ method: "GET", url: "/v1/public/transfers?driection=arc" });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("validation_error");
+    await app.close();
+  });
+
+  it("lists relayers and stays empty before any are recorded", async () => {
+    const { app } = await buildApp();
+    const response = await app.inject({ method: "GET", url: "/v1/public/relayers" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ relayers: [] });
+    await app.close();
+  });
+
+  it("does not expose service balances or API keys", async () => {
+    const { app } = await buildApp({ arc: true });
+    const stats = await app.inject({ method: "GET", url: "/v1/public/stats" });
+    const transfers = await app.inject({ method: "GET", url: "/v1/public/transfers" });
+
+    expect(stats.body).not.toContain("balance");
+    expect(stats.body).not.toContain("ohk_");
+    expect(transfers.body).not.toContain("balance");
+    expect(transfers.body).not.toContain("ohk_");
+    await app.close();
+  });
+});
+
 describe("unknown routes", () => {
   it("answers 404 with the standard error shape", async () => {
     const { app } = await buildApp();

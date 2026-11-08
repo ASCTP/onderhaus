@@ -47,6 +47,12 @@ export interface CompleteRequest {
   readonly to: string;
   readonly recipient: string;
   readonly network?: string;
+  /**
+   * Advisory transfer amount in USDC, recorded for the dashboard. It cannot redirect funds
+   * or change spending, exactly like `recipient`, and it is optional because a caller that
+   * does not report it still gets a correct completion.
+   */
+  readonly amount?: string;
 }
 
 export interface CompleteSuccess {
@@ -93,12 +99,15 @@ export interface ValidatedRequest {
   readonly direction: Direction;
   readonly burnTxHash: string;
   readonly recipient: string;
+  readonly amount: string | null;
 }
 
 const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 /** A Stellar transaction hash is the same 32 bytes without the 0x prefix. */
 const STELLAR_TX_HASH = /^[0-9a-fA-F]{64}$/;
+/** USDC amounts carry at most seven places on Stellar, so a caller cannot overstate one. */
+const USDC_AMOUNT = /^\d+(?:\.\d{1,7})?$/;
 
 /**
  * Classification for "Circle has not signed this burn yet". The retryable outcome arrives
@@ -116,7 +125,7 @@ export class Paymaster {
   }
 
   async complete(apiKey: ApiKeyRecord, request: CompleteRequest): Promise<CompleteSuccess> {
-    const { direction, burnTxHash, recipient } = this.validate(request);
+    const { direction, burnTxHash, recipient, amount } = this.validate(request);
     const leg = this.resolveLeg(direction);
     const { store, logger } = this.deps;
 
@@ -137,6 +146,7 @@ export class Paymaster {
       network: this.deps.config.network,
       direction,
       recipient,
+      amount,
     });
 
     if (begun.kind === "succeeded") {
@@ -241,13 +251,19 @@ export class Paymaster {
       );
     }
 
+    const rawAmount = request.amount?.trim();
+    const amount = rawAmount === undefined || rawAmount === "" ? null : rawAmount;
+    if (amount !== null && !USDC_AMOUNT.test(amount)) {
+      throw new ValidationError("amount must be a non-negative USDC decimal with at most seven places");
+    }
+
     if (request.network !== undefined && request.network !== this.deps.config.network) {
       throw new NetworkMismatchError(
         `This service is configured for ${this.deps.config.network} and will not transact on ${String(request.network)}.`,
       );
     }
 
-    return { direction, burnTxHash, recipient };
+    return { direction, burnTxHash, recipient, amount };
   }
 
   /**

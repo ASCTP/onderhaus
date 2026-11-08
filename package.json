@@ -16,7 +16,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "key:create": "tsx scripts/create-key.ts",
-    "key:list": "tsx scripts/list-keys.ts"
+    "key:list": "tsx scripts/list-keys.ts",
+    "transfer:import": "tsx scripts/import-transfers.ts",
+    "dashboard:dev": "pnpm --filter @asctp/onderhaus-dashboard dev",
+    "dashboard:build": "pnpm --filter @asctp/onderhaus-dashboard build",
+    "dashboard:typecheck": "pnpm --filter @asctp/onderhaus-dashboard typecheck"
   },
   "dependencies": {
     "@asctp/parabola": "^0.3.1",

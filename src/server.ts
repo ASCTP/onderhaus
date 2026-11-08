@@ -27,6 +27,7 @@ import { Store, hashApiKey } from "./db.js";
 import type { Config } from "./config.js";
 import type { Direction, Paymaster } from "./paymaster.js";
 import type { BalanceSource } from "./balance-monitor.js";
+import type { TransferQuery } from "./analytics.js";
 import { PaymasterError, RateLimitedError, UnauthorizedError } from "./errors.js";
 
 /**
@@ -88,7 +89,25 @@ const completeBodySchema = {
     to: { type: "string" },
     // 42 characters for an Arc address, 56 for a Stellar one.
     recipient: { type: "string", minLength: 42, maxLength: 56 },
+    // Advisory metadata for the dashboard. It does not gate spending.
+    amount: { type: "string", pattern: "^\\d+(?:\\.\\d{1,7})?$" },
     network: { type: "string", enum: ["mainnet", "testnet"] },
+  },
+} as const;
+
+/**
+ * The public read API pages and filters. The schema is deliberately closed so an unknown
+ * query parameter is reported rather than silently ignored, and the caps keep one client
+ * from asking the ledger for an unbounded slice.
+ */
+const transferQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    limit: { type: "integer", minimum: 1, maximum: 100 },
+    offset: { type: "integer", minimum: 0 },
+    direction: { type: "string", enum: ["arc->stellar", "stellar->arc"] },
+    status: { type: "string", enum: ["in_progress", "succeeded", "failed"] },
   },
 } as const;
 
@@ -267,6 +286,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         to: string;
         recipient: string;
         network?: string;
+        amount?: string;
       };
       const result = await paymaster.complete(apiKey, body);
       return reply.code(200).send(result);
@@ -301,6 +321,39 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       mints: store.countMintsByStatus(),
     };
   });
+
+  /**
+   * The public surface behind the dashboard. Everything here is already on chain except the
+   * service's own balances, which stay behind a key on /v1/status, so these routes expose
+   * only what an explorer would. They are still covered by the per-address limiter above.
+   */
+  app.get("/v1/public/stats", async () => store.transferStats(config.network));
+
+  app.get(
+    "/v1/public/transfers",
+    { schema: { querystring: transferQuerySchema } },
+    async (request) => {
+      const query = request.query as TransferQuery;
+      return store.listTransfers(config.network, query);
+    },
+  );
+
+  app.get("/v1/public/transfers/:burnTxHash", async (request, reply) => {
+    const { burnTxHash } = request.params as { burnTxHash: string };
+    const transfer = store.getTransfer(burnTxHash, config.network);
+    if (!transfer) {
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "No transfer with that burn hash on this network.",
+          retryable: false,
+        },
+      });
+    }
+    return transfer;
+  });
+
+  app.get("/v1/public/relayers", async () => ({ relayers: store.relayerStats(config.network) }));
 
   app.setNotFoundHandler((_request: FastifyRequest, reply: FastifyReply) => {
     return reply

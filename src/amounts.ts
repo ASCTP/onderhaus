@@ -49,3 +49,37 @@ export function formatFixed(amount: bigint, decimals: number): string {
   const fraction = (absolute % scale).toString().padStart(decimals, "0");
   return `${negative ? "-" : ""}${whole}.${fraction}`;
 }
+
+/**
+ * Adds human decimal strings without floating point. The scale is the widest fraction in
+ * the input, because the ledger can hold values from two chains at different precisions
+ * and a sum must not silently drop the finer one. Non-numeric entries are skipped rather
+ * than throwing, since this feeds a dashboard and a single bad row should not blank it.
+ */
+export function sumDecimals(values: Iterable<string>): string {
+  const list = [...values];
+  let scale = 0;
+  for (const value of list) {
+    const dot = value.trim().indexOf(".");
+    if (dot !== -1) scale = Math.max(scale, value.trim().length - dot - 1);
+  }
+  if (scale === 0) {
+    let total = 0n;
+    for (const value of list) {
+      const trimmed = value.trim();
+      if (/^\d+$/.test(trimmed)) total += BigInt(trimmed);
+    }
+    return total.toString();
+  }
+
+  const factor = 10n ** BigInt(scale);
+  let total = 0n;
+  for (const value of list) {
+    const match = /^(\d+)(?:\.(\d*))?$/.exec(value.trim());
+    if (!match) continue;
+    const whole = match[1] ?? "0";
+    const fraction = (match[2] ?? "").padEnd(scale, "0");
+    total += BigInt(whole) * factor + BigInt(fraction);
+  }
+  return formatFixed(total, scale);
+}

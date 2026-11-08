@@ -15,9 +15,10 @@ Arc settles on Arc, where gas is paid in native USDC, and is funded from a secon
 
 This is Phase 1 of three, and it is an early proof that runs rather than a product with
 users. What exists today is a single authenticated service that completes transfers in both
-directions, and both directions have been exercised end to end on testnet. Nothing has been
-run against a funded account on mainnet, and there is no hosted instance and no demo page.
-See [Scope](#scope) for the precise boundary.
+directions, both directions have been exercised end to end on testnet, and a public
+read-only dashboard sits over the ledger. Arc to Stellar has since been completed on mainnet
+against a funded account, and Stellar to Arc has not. There is no hosted instance. See
+[Scope](#scope) for the precise boundary.
 
 ## The gap this fills
 
@@ -122,6 +123,46 @@ legs it can use without provoking a 400:
 
 The 503 body carries the same `status`, `network`, and `directions` fields plus a `reason`
 string.
+
+## Public dashboard
+
+`dashboard/` is a separate Vite and React app that reads a public, read-only slice of the
+ledger. It is the first milestone of the move from a private paymaster to a trustless
+settlement protocol, and it shows what an explorer would: transfers, volume, success rate,
+latency, fees, and relayers.
+
+```bash
+pnpm install
+pnpm dev            # API on :3000
+pnpm dashboard:dev  # dashboard on :5173, proxying /v1 to the API
+```
+
+The public routes need no key and are bounded by the same per-address limiter as everything
+else:
+
+| Route | Returns |
+| --- | --- |
+| `GET /v1/public/stats` | Totals, success rate, USDC volume, fees by unit, latency, relayers, and 14 daily points. |
+| `GET /v1/public/transfers` | A page of transfers, filterable by `direction`, `status`, `limit`, and `offset`. |
+| `GET /v1/public/transfers/:burnTxHash` | One transfer, or 404. |
+| `GET /v1/public/relayers` | Completed transfers and volume grouped by relayer. |
+
+Service balances and API keys stay behind a key on `/v1/status`. The dashboard's Operator tab
+asks for that key and keeps it in `sessionStorage` for the tab only.
+
+`pnpm dashboard:build` emits static files to `dashboard/dist/`. Point it at a non-default API
+with `VITE_API_BASE` at build time. The dashboard does not invent Arc explorer links, because
+the Arc explorer base is not guaranteed; hashes stay copyable instead.
+
+The service ledger only knows what it completed itself. Import a transfer completed elsewhere,
+or before the read model existed, with a JSON array or newline-delimited objects:
+
+```bash
+pnpm transfer:import -- --file transfers.json --network testnet
+```
+
+Re-importing the same burn hash on the same network updates the row rather than duplicating
+it.
 
 ## Producing the burn to complete
 
@@ -275,12 +316,14 @@ Built:
 - Per-key API keys, rate limiting, daily spend caps, and a metered usage ledger that records
   the direction each row was for
 - Idempotent completion keyed on the burn hash, so a retry does not resubmit
+- A public, read-only transfer API and a React dashboard over it
 
 Not built:
 
-- A hosted instance and a demo page, which is Phase 3.
-- A mainnet run. Everything so far has been on testnet.
-- Any on-chain fee mechanism. See the fee model below.
+- An on-chain fee mechanism. The dashboard is the first step of that pivot; the settlement
+  contract, open relayers, and a hosted public instance follow.
+- A mainnet run in the Stellar to Arc direction. Arc to Stellar has been completed on
+  mainnet, but the reverse has only ever run on testnet.
 - Batch submission. Each completion is one request.
 
 ## Fee model
@@ -371,40 +414,36 @@ trillion without failing loudly.
 ## Development
 
 ```bash
-pnpm typecheck   # tsc --noEmit
-pnpm test        # vitest, 85 tests, no network access
-pnpm build       # tsup, emits ESM to dist/
-pnpm key:create  # provision an API key
-pnpm key:list    # list keys and today's usage
+pnpm typecheck           # tsc --noEmit
+pnpm test                # vitest, offline, no network access
+pnpm build               # tsup, emits ESM to dist/
+pnpm key:create          # provision an API key
+pnpm key:list            # list keys and today's usage
+pnpm transfer:import     # import settlement events into the read model
+pnpm dashboard:dev       # dashboard dev server
+pnpm dashboard:typecheck # dashboard tsc --noEmit
+pnpm dashboard:build     # static dashboard build
 ```
 
 Tests inject fakes for the two SDK calls that would otherwise reach the network, so the
-suite runs offline and never spends anything. `pnpm test` currently passes with 85 tests
-across 4 files.
+suite runs offline and never spends anything. `pnpm test` currently passes with 108 tests
+across 5 files.
 
 Both directions have been completed against a live testnet burn produced outside the
-service, and each settlement was then verified independently of it.
+service, and each settlement was then verified independently of it. In both cases the
+recipient's balance rose by the transferred amount, the recipient's own XLM went untouched,
+and replaying the same burn returned `replayed: true` without a second submission.
 
-Arc to Stellar. Burn
-`0x24d19d7515f72359fa7bb8b066674b1bb7de4c32a0a424d59717641b03f80783` was submitted and
-settled as Stellar transaction
-`c60dafc3e40bfb65fd72499ce649affa7d030650d66c93fe616b3630de1637e8` in ledger 5056172. The
-recipient held 1.0000000 USDC afterwards, with their XLM balance untouched by the mint. The
-service account paid 186890 stroops, the ledger row recorded one attempt, and replaying the
-same burn returned `replayed: true` without a second submission.
+One detail on the Stellar to Arc leg is worth keeping. Its burn came from a `transfer` call
+with no `destinationSigner`, which leaves the SDK returning a `pending` transfer and
+completion to whoever holds the hash. The service completed it from its own Arc key, and the
+fee it paid in native USDC matched the fall in that account's balance exactly, read
+independently of the service.
 
-Stellar to Arc. Burn
-`a62a448a3b5fb826644f26717c8a2e295ab772af47f337715dfb20ab3aaebb10` was produced by a
-`transfer` call with no `destinationSigner`, which leaves the SDK returning a `pending`
-transfer and completion to whoever holds the hash. The service completed it in 3.783 seconds
-as Arc transaction
-`0xed4f8572b9c3c598235edc45844e1e20bba0cdc2a0dc940ad22c3f1ba4cb1081` in block 65830403,
-status success, from the service's own Arc key. The receipt was read independently: 186731
-gas at 0.000000025 USDC per gas, a fee of 0.004668275 USDC. The recipient's balance read
-exactly 0.5 USDC afterwards and the service's native balance fell by exactly the fee.
-Replaying the same burn returned `replayed: true` without a second submission.
+Arc to Stellar has since been completed on mainnet against a funded account. The service
+account paid the XLM fee there and the Arc account went untouched.
 
-No mainnet transfer has been run in either direction.
+No mainnet transfer has been run in the Stellar to Arc direction.
 
 ## License
 
