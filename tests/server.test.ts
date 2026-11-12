@@ -534,6 +534,64 @@ describe("public dashboard API", () => {
     expect(transfers.body).not.toContain("ohk_");
     await app.close();
   });
+
+  it("serves indexed settlements, their detail, stats, and relayer totals", async () => {
+    const { app, store } = await buildApp();
+    const nonce = "ab".repeat(32);
+    const relayer = "GDWUZIRZCCCVKE2JZ3XIKZ5EC2LT4PY5RY7XZGP3EC5YWTK3GZHQU2AW";
+    store.recordSettlement({
+      network: "testnet",
+      contractId: "CARSIIMF4ERN5V2TTTQT4ACFFKJKKDZAD4RLV64B6D2I5S4UDFHPQN2R",
+      sourceDomain: 26,
+      nonce,
+      txHash: "settle-tx",
+      ledger: 5_698_081,
+      ledgerClosedAt: "2026-11-12T20:07:29Z",
+      recipient: VALID_RECIPIENT,
+      relayer,
+      amount: "0.5000000",
+      fee: "0.0100000",
+      relayerFee: "0.0070000",
+      treasuryFee: "0.0030000",
+    });
+
+    const list = await app.inject({ method: "GET", url: "/v1/public/settlements" });
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toMatchObject({ total: 1, limit: 25, offset: 0 });
+    expect(list.json().settlements[0].nonce).toBe(nonce);
+
+    const filtered = await app.inject({
+      method: "GET",
+      url: `/v1/public/settlements?relayer=${encodeURIComponent(relayer)}`,
+    });
+    expect(filtered.json().total).toBe(1);
+
+    const found = await app.inject({ method: "GET", url: `/v1/public/settlements/26/${nonce}` });
+    expect(found.statusCode).toBe(200);
+    expect(found.json()).toMatchObject({ txHash: "settle-tx", relayerFee: "0.0070000" });
+
+    const missing = await app.inject({ method: "GET", url: `/v1/public/settlements/26/${"00".repeat(32)}` });
+    expect(missing.statusCode).toBe(404);
+
+    const stats = await app.inject({ method: "GET", url: "/v1/public/settlement-stats" });
+    expect(stats.json()).toMatchObject({
+      totals: { settlements: 1, relayers: 1, recipients: 1 },
+      volumeUsdc: "0.5000000",
+      feesUsdc: "0.0100000",
+    });
+
+    const relayers = await app.inject({ method: "GET", url: "/v1/public/settlement-relayers" });
+    expect(relayers.json().relayers[0]).toMatchObject({ relayer, settlements: 1 });
+    await app.close();
+  });
+
+  it("rejects an unknown settlement query parameter", async () => {
+    const { app } = await buildApp();
+    const response = await app.inject({ method: "GET", url: "/v1/public/settlements?contractId=x" });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("validation_error");
+    await app.close();
+  });
 });
 
 describe("unknown routes", () => {

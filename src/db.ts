@@ -26,6 +26,15 @@ import {
   type TransferQuery,
   type TransferStatus,
 } from "./analytics.js";
+import type {
+  SettlementDailyPoint,
+  SettlementInsert,
+  SettlementPage,
+  SettlementQuery,
+  SettlementRecord,
+  SettlementRelayerStat,
+  SettlementStats,
+} from "./settlements.js";
 
 export type MintStatus = "in_progress" | "succeeded" | "failed";
 
@@ -105,6 +114,24 @@ interface TransferRow {
   updated_at: string;
 }
 
+interface SettlementRow {
+  id: number;
+  network: string;
+  contract_id: string;
+  source_domain: number;
+  nonce: string;
+  tx_hash: string;
+  ledger: number;
+  ledger_closed_at: string;
+  recipient: string;
+  relayer: string;
+  amount: string;
+  fee: string;
+  relayer_fee: string;
+  treasury_fee: string;
+  indexed_at: string;
+}
+
 export function hashApiKey(rawKey: string): string {
   return createHash("sha256").update(rawKey).digest("hex");
 }
@@ -163,6 +190,26 @@ function toTransferEvent(row: TransferRow): TransferEvent {
     origin: row.origin,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toSettlementRecord(row: SettlementRow): SettlementRecord {
+  return {
+    id: row.id,
+    network: row.network,
+    contractId: row.contract_id,
+    sourceDomain: row.source_domain,
+    nonce: row.nonce,
+    txHash: row.tx_hash,
+    ledger: row.ledger,
+    ledgerClosedAt: row.ledger_closed_at,
+    recipient: row.recipient,
+    relayer: row.relayer,
+    amount: row.amount,
+    fee: row.fee,
+    relayerFee: row.relayer_fee,
+    treasuryFee: row.treasury_fee,
+    indexedAt: row.indexed_at,
   };
 }
 
@@ -254,6 +301,42 @@ export class Store {
         ON transfer_events (network, submitted_at DESC);
       CREATE INDEX IF NOT EXISTS idx_transfer_events_relayer
         ON transfer_events (network, relayer);
+
+      CREATE TABLE IF NOT EXISTS settlements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        network TEXT NOT NULL,
+        contract_id TEXT NOT NULL,
+        source_domain INTEGER NOT NULL,
+        nonce TEXT NOT NULL,
+        tx_hash TEXT NOT NULL,
+        ledger INTEGER NOT NULL,
+        ledger_closed_at TEXT NOT NULL,
+        recipient TEXT NOT NULL,
+        relayer TEXT NOT NULL,
+        amount TEXT NOT NULL,
+        fee TEXT NOT NULL,
+        relayer_fee TEXT NOT NULL,
+        treasury_fee TEXT NOT NULL,
+        indexed_at TEXT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_identity
+        ON settlements (network, source_domain, nonce);
+      CREATE INDEX IF NOT EXISTS idx_settlements_tx
+        ON settlements (network, tx_hash);
+      CREATE INDEX IF NOT EXISTS idx_settlements_ledger
+        ON settlements (network, ledger DESC);
+      CREATE INDEX IF NOT EXISTS idx_settlements_relayer
+        ON settlements (network, relayer);
+      CREATE INDEX IF NOT EXISTS idx_settlements_recipient
+        ON settlements (network, recipient);
+
+      CREATE TABLE IF NOT EXISTS indexer_cursors (
+        key TEXT PRIMARY KEY,
+        cursor TEXT NOT NULL,
+        last_ledger INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     // A database created before the reverse direction existed has no such column, and
@@ -673,6 +756,167 @@ export class Store {
       .sort((a, b) => b.completed - a.completed);
   }
 
+  recordSettlement(input: SettlementInsert): boolean {
+    const now = new Date().toISOString();
+    const info = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO settlements
+         (network, contract_id, source_domain, nonce, tx_hash, ledger, ledger_closed_at,
+          recipient, relayer, amount, fee, relayer_fee, treasury_fee, indexed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.network,
+        input.contractId,
+        input.sourceDomain,
+        input.nonce,
+        input.txHash,
+        input.ledger,
+        input.ledgerClosedAt,
+        input.recipient,
+        input.relayer,
+        input.amount,
+        input.fee,
+        input.relayerFee,
+        input.treasuryFee,
+        now,
+      );
+    return info.changes > 0;
+  }
+
+  listSettlements(network: string, query: SettlementQuery = {}): SettlementPage {
+    const limit = Math.min(100, Math.max(1, query.limit ?? 25));
+    const offset = Math.max(0, query.offset ?? 0);
+    const filters: string[] = ["network = ?"];
+    const params: (string | number)[] = [network];
+    if (query.relayer !== undefined) {
+      filters.push("relayer = ?");
+      params.push(query.relayer);
+    }
+    if (query.recipient !== undefined) {
+      filters.push("recipient = ?");
+      params.push(query.recipient);
+    }
+    if (query.sourceDomain !== undefined) {
+      filters.push("source_domain = ?");
+      params.push(query.sourceDomain);
+    }
+    const where = filters.join(" AND ");
+    const total = (
+      this.db.prepare(`SELECT COUNT(*) AS n FROM settlements WHERE ${where}`).get(...params) as { n: number }
+    ).n;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM settlements WHERE ${where}
+         ORDER BY ledger DESC, id DESC LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as SettlementRow[];
+    return { settlements: rows.map(toSettlementRecord), total, limit, offset };
+  }
+
+  getSettlement(network: string, sourceDomain: number, nonce: string): SettlementRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM settlements WHERE network = ? AND source_domain = ? AND nonce = ? COLLATE NOCASE`,
+      )
+      .get(network, sourceDomain, nonce) as SettlementRow | undefined;
+    return row ? toSettlementRecord(row) : undefined;
+  }
+
+  settlementStats(network: string): SettlementStats {
+    const rows = this.db
+      .prepare(`SELECT * FROM settlements WHERE network = ? ORDER BY ledger ASC`)
+      .all(network) as SettlementRow[];
+    const settlements = rows.map(toSettlementRecord);
+    const relayers = new Set(settlements.map((row) => row.relayer));
+    const recipients = new Set(settlements.map((row) => row.recipient));
+    const dayMs = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const last24h = settlements.filter((row) => Date.parse(row.ledgerClosedAt) >= now - dayMs);
+
+    return {
+      network,
+      generatedAt: new Date(now).toISOString(),
+      totals: {
+        settlements: settlements.length,
+        relayers: relayers.size,
+        recipients: recipients.size,
+      },
+      volumeUsdc: sumDecimals(settlements.map((row) => row.amount)),
+      feesUsdc: sumDecimals(settlements.map((row) => row.fee)),
+      relayerFeesUsdc: sumDecimals(settlements.map((row) => row.relayerFee)),
+      treasuryFeesUsdc: sumDecimals(settlements.map((row) => row.treasuryFee)),
+      last24h: {
+        settlements: last24h.length,
+        volumeUsdc: sumDecimals(last24h.map((row) => row.amount)),
+        feesUsdc: sumDecimals(last24h.map((row) => row.fee)),
+      },
+      daily: buildSettlementDaily(settlements, now, 14),
+    };
+  }
+
+  settlementRelayerStats(network: string): SettlementRelayerStat[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM settlements WHERE network = ?`)
+      .all(network) as SettlementRow[];
+    const groups = new Map<
+      string,
+      {
+        settlements: number;
+        amounts: string[];
+        fees: string[];
+        relayerFees: string[];
+        treasuryFees: string[];
+        lastSeenAt: string;
+      }
+    >();
+    for (const row of rows) {
+      const group = groups.get(row.relayer) ?? {
+        settlements: 0,
+        amounts: [],
+        fees: [],
+        relayerFees: [],
+        treasuryFees: [],
+        lastSeenAt: row.ledger_closed_at,
+      };
+      group.settlements += 1;
+      group.amounts.push(row.amount);
+      group.fees.push(row.fee);
+      group.relayerFees.push(row.relayer_fee);
+      group.treasuryFees.push(row.treasury_fee);
+      if (row.ledger_closed_at > group.lastSeenAt) group.lastSeenAt = row.ledger_closed_at;
+      groups.set(row.relayer, group);
+    }
+    return [...groups.entries()]
+      .map(([relayer, group]) => ({
+        relayer,
+        settlements: group.settlements,
+        volumeUsdc: sumDecimals(group.amounts),
+        feesUsdc: sumDecimals(group.fees),
+        relayerFeesUsdc: sumDecimals(group.relayerFees),
+        treasuryFeesUsdc: sumDecimals(group.treasuryFees),
+        lastSeenAt: group.lastSeenAt,
+      }))
+      .sort((a, b) => b.settlements - a.settlements);
+  }
+
+  getIndexerCursor(key: string): { cursor: string; lastLedger: number } | undefined {
+    const row = this.db.prepare(`SELECT cursor, last_ledger FROM indexer_cursors WHERE key = ?`).get(key) as
+      | { cursor: string; last_ledger: number }
+      | undefined;
+    return row ? { cursor: row.cursor, lastLedger: row.last_ledger } : undefined;
+  }
+
+  setIndexerCursor(key: string, cursor: string, lastLedger: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO indexer_cursors (key, cursor, last_ledger, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET cursor = excluded.cursor,
+           last_ledger = excluded.last_ledger, updated_at = excluded.updated_at`,
+      )
+      .run(key, cursor, lastLedger, new Date().toISOString());
+  }
+
   countMintsByStatus(): Record<string, number> {
     const rows = this.db.prepare(`SELECT status, COUNT(*) AS n FROM mints GROUP BY status`).all() as {
       status: string;
@@ -721,5 +965,47 @@ function buildDaily(events: readonly TransferEvent[], now: number, days: number)
     succeeded: bucket.succeeded,
     failed: bucket.failed,
     volumeUsdc: sumDecimals(bucket.amounts),
+  }));
+}
+
+function buildSettlementDaily(
+  settlements: readonly SettlementRecord[],
+  now: number,
+  days: number,
+): SettlementDailyPoint[] {
+  const buckets = new Map<
+    string,
+    { settlements: number; amounts: string[]; fees: string[]; relayerFees: string[]; treasuryFees: string[] }
+  >();
+  const today = new Date(now);
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const day = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - offset));
+    buckets.set(day.toISOString().slice(0, 10), {
+      settlements: 0,
+      amounts: [],
+      fees: [],
+      relayerFees: [],
+      treasuryFees: [],
+    });
+  }
+
+  for (const settlement of settlements) {
+    const key = new Date(settlement.ledgerClosedAt).toISOString().slice(0, 10);
+    const bucket = buckets.get(key);
+    if (!bucket) continue;
+    bucket.settlements += 1;
+    bucket.amounts.push(settlement.amount);
+    bucket.fees.push(settlement.fee);
+    bucket.relayerFees.push(settlement.relayerFee);
+    bucket.treasuryFees.push(settlement.treasuryFee);
+  }
+
+  return [...buckets.entries()].map(([date, bucket]) => ({
+    date,
+    settlements: bucket.settlements,
+    volumeUsdc: sumDecimals(bucket.amounts),
+    feesUsdc: sumDecimals(bucket.fees),
+    relayerFeesUsdc: sumDecimals(bucket.relayerFees),
+    treasuryFeesUsdc: sumDecimals(bucket.treasuryFees),
   }));
 }

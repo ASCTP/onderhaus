@@ -28,6 +28,7 @@ import type { Config } from "./config.js";
 import type { Direction, Paymaster } from "./paymaster.js";
 import type { BalanceSource } from "./balance-monitor.js";
 import type { TransferQuery } from "./analytics.js";
+import type { SettlementQuery } from "./settlements.js";
 import { PaymasterError, RateLimitedError, UnauthorizedError } from "./errors.js";
 
 /**
@@ -108,6 +109,18 @@ const transferQuerySchema = {
     offset: { type: "integer", minimum: 0 },
     direction: { type: "string", enum: ["arc->stellar", "stellar->arc"] },
     status: { type: "string", enum: ["in_progress", "succeeded", "failed"] },
+  },
+} as const;
+
+const settlementQuerySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    limit: { type: "integer", minimum: 1, maximum: 100 },
+    offset: { type: "integer", minimum: 0 },
+    relayer: { type: "string", minLength: 1, maxLength: 64 },
+    recipient: { type: "string", minLength: 1, maxLength: 64 },
+    sourceDomain: { type: "integer", minimum: 0 },
   },
 } as const;
 
@@ -354,6 +367,46 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   });
 
   app.get("/v1/public/relayers", async () => ({ relayers: store.relayerStats(config.network) }));
+
+  app.get("/v1/public/settlement-stats", async () => store.settlementStats(config.network));
+
+  app.get(
+    "/v1/public/settlements",
+    { schema: { querystring: settlementQuerySchema } },
+    async (request) => {
+      const query = request.query as SettlementQuery;
+      return store.listSettlements(config.network, query);
+    },
+  );
+
+  app.get("/v1/public/settlements/:sourceDomain/:nonce", async (request, reply) => {
+    const { sourceDomain, nonce } = request.params as { sourceDomain: string; nonce: string };
+    const domain = Number(sourceDomain);
+    if (!Number.isInteger(domain) || domain < 0 || !/^[0-9a-fA-F]{64}$/.test(nonce)) {
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "No settlement with that source domain and nonce on this network.",
+          retryable: false,
+        },
+      });
+    }
+    const settlement = store.getSettlement(config.network, domain, nonce);
+    if (!settlement) {
+      return reply.code(404).send({
+        error: {
+          code: "not_found",
+          message: "No settlement with that source domain and nonce on this network.",
+          retryable: false,
+        },
+      });
+    }
+    return settlement;
+  });
+
+  app.get("/v1/public/settlement-relayers", async () => ({
+    relayers: store.settlementRelayerStats(config.network),
+  }));
 
   app.setNotFoundHandler((_request: FastifyRequest, reply: FastifyReply) => {
     return reply
