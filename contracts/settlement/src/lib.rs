@@ -68,6 +68,7 @@ pub enum DataKey {
     Usdc,
     Treasury,
     MaxFeeBps,
+    RelayerBps,
 }
 
 #[contracttype]
@@ -78,14 +79,18 @@ pub struct SettlementConfig {
     pub usdc: Address,
     pub treasury: Address,
     pub max_fee_bps: u32,
+    pub relayer_bps: u32,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SettlementReceipt {
     pub recipient: Address,
+    pub relayer: Address,
     pub amount: i128,
     pub fee: i128,
+    pub relayer_fee: i128,
+    pub treasury_fee: i128,
 }
 
 #[contractevent(topics = ["settled"])]
@@ -93,8 +98,12 @@ pub struct SettlementReceipt {
 pub struct Settled {
     #[topic]
     pub recipient: Address,
+    #[topic]
+    pub relayer: Address,
     pub amount: i128,
     pub fee: i128,
+    pub relayer_fee: i128,
+    pub treasury_fee: i128,
 }
 
 struct HookData {
@@ -114,8 +123,9 @@ impl SettlementContract {
         usdc: Address,
         treasury: Address,
         max_fee_bps: u32,
+        relayer_bps: u32,
     ) {
-        if max_fee_bps > BPS_DENOMINATOR as u32 {
+        if max_fee_bps > BPS_DENOMINATOR as u32 || relayer_bps > BPS_DENOMINATOR as u32 {
             panic_with_error!(&e, SettlementError::InvalidConfig);
         }
         let instance = e.storage().instance();
@@ -124,12 +134,15 @@ impl SettlementContract {
         instance.set(&DataKey::Usdc, &usdc);
         instance.set(&DataKey::Treasury, &treasury);
         instance.set(&DataKey::MaxFeeBps, &max_fee_bps);
+        instance.set(&DataKey::RelayerBps, &relayer_bps);
     }
 
     /// Mints a CCTP message to this contract and splits the result. Permissionless: any
     /// relayer may submit a message, provided the burn named this contract as the
     /// destination caller or left the caller unrestricted.
-    pub fn settle(e: Env, message: Bytes, attestation: Bytes) -> SettlementReceipt {
+    pub fn settle(e: Env, relayer: Address, message: Bytes, attestation: Bytes) -> SettlementReceipt {
+        relayer.require_auth();
+
         if message.len() < BODY_END_OFFSET {
             panic_with_error!(&e, SettlementError::MessageTooShort);
         }
@@ -184,9 +197,21 @@ impl SettlementContract {
             panic_with_error!(&e, SettlementError::FeeTooHigh);
         }
 
-        if parsed.fee > 0 {
+        let relayer_bps = get_relayer_bps(&e);
+        let relayer_fee = parsed
+            .fee
+            .checked_mul(relayer_bps)
+            .unwrap_or_else(|| panic_with_error!(&e, SettlementError::FeeTooHigh))
+            / BPS_DENOMINATOR;
+        let treasury_fee = parsed.fee - relayer_fee;
+
+        if relayer_fee > 0 {
+            let relayer_address: MuxedAddress = relayer.clone().into();
+            token_client.transfer(&contract, &relayer_address, &relayer_fee);
+        }
+        if treasury_fee > 0 {
             let treasury: MuxedAddress = get_address(&e, DataKey::Treasury).into();
-            token_client.transfer(&contract, &treasury, &parsed.fee);
+            token_client.transfer(&contract, &treasury, &treasury_fee);
         }
 
         let payout = amount - parsed.fee;
@@ -194,13 +219,19 @@ impl SettlementContract {
 
         let receipt = SettlementReceipt {
             recipient: recipient_address,
+            relayer: relayer.clone(),
             amount,
             fee: parsed.fee,
+            relayer_fee,
+            treasury_fee,
         };
         Settled {
             recipient: receipt.recipient.clone(),
+            relayer: receipt.relayer.clone(),
             amount: receipt.amount,
             fee: receipt.fee,
+            relayer_fee: receipt.relayer_fee,
+            treasury_fee: receipt.treasury_fee,
         }
         .publish(&e);
         receipt
@@ -213,6 +244,7 @@ impl SettlementContract {
             usdc: get_address(&e, DataKey::Usdc),
             treasury: get_address(&e, DataKey::Treasury),
             max_fee_bps: get_max_fee_bps(&e) as u32,
+            relayer_bps: get_relayer_bps(&e) as u32,
         }
     }
 }
@@ -229,6 +261,15 @@ fn get_max_fee_bps(e: &Env) -> i128 {
         .storage()
         .instance()
         .get(&DataKey::MaxFeeBps)
+        .unwrap_or_else(|| panic_with_error!(e, SettlementError::InvalidConfig));
+    stored as i128
+}
+
+fn get_relayer_bps(e: &Env) -> i128 {
+    let stored: u32 = e
+        .storage()
+        .instance()
+        .get(&DataKey::RelayerBps)
         .unwrap_or_else(|| panic_with_error!(e, SettlementError::InvalidConfig));
     stored as i128
 }

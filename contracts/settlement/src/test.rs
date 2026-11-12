@@ -52,10 +52,15 @@ struct Setup {
     token: Address,
     treasury: Address,
     recipient: Address,
+    relayer: Address,
     handler: Address,
 }
 
 fn setup(mint_amount: i128, max_fee_bps: u32) -> Setup {
+    setup_with_relayer_bps(mint_amount, max_fee_bps, 7_000)
+}
+
+fn setup_with_relayer_bps(mint_amount: i128, max_fee_bps: u32, relayer_bps: u32) -> Setup {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -68,6 +73,7 @@ fn setup(mint_amount: i128, max_fee_bps: u32) -> Setup {
     let handler = env.register(MockHandler, ());
     let treasury = env.register(MockHandler, ());
     let recipient = env.register(MockHandler, ());
+    let relayer = env.register(MockHandler, ());
 
     let settlement = env.register(
         SettlementContract,
@@ -77,6 +83,7 @@ fn setup(mint_amount: i128, max_fee_bps: u32) -> Setup {
             token.clone(),
             treasury.clone(),
             max_fee_bps,
+            relayer_bps,
         ),
     );
 
@@ -86,6 +93,7 @@ fn setup(mint_amount: i128, max_fee_bps: u32) -> Setup {
         token,
         treasury,
         recipient,
+        relayer,
         handler,
     }
 }
@@ -147,13 +155,66 @@ fn settles_and_splits_the_minted_amount() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let receipt = SettlementContractClient::new(&s.env, &s.settlement)
-        .settle(&message, &Bytes::new(&s.env));
+        .settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_eq!(receipt.amount, 1_000);
     assert_eq!(receipt.fee, 50);
+    assert_eq!(receipt.relayer, s.relayer);
+    assert_eq!(receipt.relayer_fee, 35);
+    assert_eq!(receipt.treasury_fee, 15);
     assert_eq!(balance(&s, &s.recipient), 950);
-    assert_eq!(balance(&s, &s.treasury), 50);
+    assert_eq!(balance(&s, &s.relayer), 35);
+    assert_eq!(balance(&s, &s.treasury), 15);
     assert_eq!(balance(&s, &s.settlement), 0);
+}
+
+#[test]
+fn sends_the_whole_fee_to_the_relayer_at_full_relayer_bps() {
+    let s = setup_with_relayer_bps(1_000, 500, 10_000);
+    let hook = build_hook(&s.env, &s.recipient, Some(50));
+    let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
+
+    let receipt = SettlementContractClient::new(&s.env, &s.settlement)
+        .settle(&s.relayer, &message, &Bytes::new(&s.env));
+
+    assert_eq!(receipt.relayer_fee, 50);
+    assert_eq!(receipt.treasury_fee, 0);
+    assert_eq!(balance(&s, &s.relayer), 50);
+    assert_eq!(balance(&s, &s.treasury), 0);
+}
+
+#[test]
+fn sends_the_whole_fee_to_the_treasury_at_zero_relayer_bps() {
+    let s = setup_with_relayer_bps(1_000, 500, 0);
+    let hook = build_hook(&s.env, &s.recipient, Some(50));
+    let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
+
+    let receipt = SettlementContractClient::new(&s.env, &s.settlement)
+        .settle(&s.relayer, &message, &Bytes::new(&s.env));
+
+    assert_eq!(receipt.relayer_fee, 0);
+    assert_eq!(receipt.treasury_fee, 50);
+    assert_eq!(balance(&s, &s.relayer), 0);
+    assert_eq!(balance(&s, &s.treasury), 50);
+}
+
+#[test]
+fn rounds_the_relayer_share_down() {
+    let s = setup_with_relayer_bps(1_000, 500, 7_000);
+    let hook = build_hook(&s.env, &s.recipient, Some(1));
+    let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
+
+    let receipt = SettlementContractClient::new(&s.env, &s.settlement)
+        .settle(&s.relayer, &message, &Bytes::new(&s.env));
+
+    assert_eq!(receipt.relayer_fee, 0);
+    assert_eq!(receipt.treasury_fee, 1);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn rejects_a_relayer_share_above_the_denominator() {
+    setup_with_relayer_bps(1_000, 100, 10_001);
 }
 
 #[test]
@@ -163,7 +224,7 @@ fn settles_without_a_fee_payload() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let receipt = SettlementContractClient::new(&s.env, &s.settlement)
-        .settle(&message, &Bytes::new(&s.env));
+        .settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_eq!(receipt.fee, 0);
     assert_eq!(balance(&s, &s.recipient), 1_000);
@@ -177,7 +238,7 @@ fn rejects_a_fee_above_the_configured_ceiling() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::FeeTooHigh);
 }
@@ -189,7 +250,7 @@ fn rejects_a_message_minted_to_another_contract() {
     let message = build_message(&s.env, &s.handler, &s.treasury, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::InvalidMintRecipient);
 }
@@ -201,7 +262,7 @@ fn rejects_a_message_for_another_handler() {
     let message = build_message(&s.env, &s.treasury, &s.settlement, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::InvalidMessageRecipient);
 }
@@ -212,7 +273,7 @@ fn rejects_a_hook_that_is_too_short() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &Bytes::new(&s.env));
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::HookDataTooShort);
 }
@@ -225,7 +286,7 @@ fn rejects_a_trailing_payload_that_is_not_a_fee() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::InvalidFeePayload);
 }
@@ -242,7 +303,7 @@ fn rejects_an_unsupported_hook_version() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::InvalidHookVersion);
 }
@@ -253,7 +314,7 @@ fn rejects_a_message_shorter_than_the_burn_body() {
     let short = Bytes::from_slice(&s.env, &[0u8; 100]);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&short, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &short, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::MessageTooShort);
 }
@@ -265,7 +326,7 @@ fn rejects_a_zero_mint() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::NoTokensMinted);
 }
@@ -277,7 +338,7 @@ fn rejects_a_forward_recipient_that_is_the_usdc_contract() {
     let message = build_message(&s.env, &s.handler, &s.settlement, &hook);
 
     let result = SettlementContractClient::new(&s.env, &s.settlement)
-        .try_settle(&message, &Bytes::new(&s.env));
+        .try_settle(&s.relayer, &message, &Bytes::new(&s.env));
 
     assert_contract_error(result, SettlementError::InvalidForwardRecipient);
 }
@@ -291,4 +352,5 @@ fn exposes_its_configuration() {
     assert_eq!(config.usdc, s.token);
     assert_eq!(config.treasury, s.treasury);
     assert_eq!(config.max_fee_bps, 250);
+    assert_eq!(config.relayer_bps, 7_000);
 }
