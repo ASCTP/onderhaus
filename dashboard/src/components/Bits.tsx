@@ -1,13 +1,4 @@
 import { useState, type ReactNode } from "react";
-import type { TransferDirection, TransferStatus } from "../types";
-
-export function StatusPill({ status }: { status: TransferStatus }) {
-  return <span className={`pill pill-${status}`}>{status.replace("_", " ")}</span>;
-}
-
-export function DirectionBadge({ direction }: { direction: TransferDirection }) {
-  return <span className="direction">{direction}</span>;
-}
 
 export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);

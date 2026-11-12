@@ -1,13 +1,9 @@
 import type {
   OperatorStatus,
-  ProtocolStats,
-  RelayerStat,
   Settlement,
   SettlementPage,
   SettlementRelayerStat,
   SettlementStats,
-  TransferEvent,
-  TransferPage,
 } from "./types";
 
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "";
@@ -28,13 +24,6 @@ async function getJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export interface TransferRequest {
-  limit?: number;
-  offset?: number;
-  direction?: string;
-  status?: string;
-}
-
 export interface SettlementRequest {
   limit?: number;
   offset?: number;
@@ -43,23 +32,6 @@ export interface SettlementRequest {
 }
 
 export const api = {
-  stats: (): Promise<ProtocolStats> => getJson<ProtocolStats>("/v1/public/stats"),
-
-  transfers: (params: TransferRequest = {}): Promise<TransferPage> => {
-    const search = new URLSearchParams();
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== "") search.set(key, String(value));
-    }
-    const suffix = search.toString();
-    return getJson<TransferPage>(`/v1/public/transfers${suffix === "" ? "" : `?${suffix}`}`);
-  },
-
-  transfer: (burnTxHash: string): Promise<TransferEvent> =>
-    getJson<TransferEvent>(`/v1/public/transfers/${encodeURIComponent(burnTxHash)}`),
-
-  relayers: (): Promise<{ relayers: RelayerStat[] }> =>
-    getJson<{ relayers: RelayerStat[] }>("/v1/public/relayers"),
-
   settlementStats: (): Promise<SettlementStats> =>
     getJson<SettlementStats>("/v1/public/settlement-stats"),
 
