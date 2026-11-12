@@ -37,6 +37,8 @@ interface SettlementConfig {
 interface SettlementReceipt {
   recipient: string;
   relayer: string;
+  source_domain: number;
+  nonce: Buffer;
   amount: bigint;
   fee: bigint;
   relayer_fee: bigint;
@@ -165,6 +167,7 @@ async function main(): Promise<void> {
       "",
       `Contract:       ${contractId}`,
       `Burn:           ${burnTxHash}`,
+      `Message:        ${message.sourceDomain}:${message.nonce}`,
       `Recipient:      ${message.recipient}`,
       `Fee:            ${formatFixed(message.fee, USDC_DECIMALS)} USDC`,
       `Relayer share:  ${formatFixed(payout, USDC_DECIMALS)} USDC (${config.relayer_bps} bps)`,
@@ -199,6 +202,7 @@ async function main(): Promise<void> {
   process.stdout.write(
     [
       `Settle tx:      ${result.hash}`,
+      `Message:        ${receipt.source_domain}:${Buffer.from(receipt.nonce).toString("hex")}`,
       `Forwarded to:   ${receipt.recipient}`,
       `Minted:         ${formatFixed(receipt.amount, USDC_DECIMALS)} USDC`,
       `Relayer paid:   ${formatFixed(receipt.relayer_fee, USDC_DECIMALS)} USDC`,

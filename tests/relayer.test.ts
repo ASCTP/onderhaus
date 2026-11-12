@@ -44,6 +44,8 @@ function buildHook(recipient: string, fee?: bigint, version = 0): Buffer {
 
 function buildMessage(hook: Buffer, amount = 5_000_000n): Buffer {
   const message = Buffer.alloc(376 + hook.length);
+  message.writeUInt32BE(26, 4);
+  message.fill(0x07, 12, 44);
   writeBytes32(message, HEADER_RECIPIENT_OFFSET, 0x11);
   writeBytes32(message, HEADER_DESTINATION_CALLER_OFFSET, 0x22);
   writeBytes32(message, BODY_MINT_RECIPIENT_OFFSET, 0x33);
@@ -59,6 +61,8 @@ describe("parseSettlementMessage", () => {
     expect(parsed.amount).toBe(5_000_000n);
     expect(parsed.fee).toBe(100_000n);
     expect(parsed.recipient).toBe(C);
+    expect(parsed.sourceDomain).toBe(26);
+    expect(parsed.nonce).toBe("07".repeat(32));
     expect(parsed.handler).toEqual(Buffer.alloc(32, 0x11));
     expect(parsed.mintRecipient).toEqual(Buffer.alloc(32, 0x33));
     expect(parsed.destinationCaller).toEqual(Buffer.alloc(32, 0x22));

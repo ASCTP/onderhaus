@@ -125,7 +125,7 @@ fn build_message(e: &Env, handler: &Address, mint_recipient: &Address, hook: &By
     message.extend_from_array(&1u32.to_be_bytes());
     message.extend_from_array(&26u32.to_be_bytes());
     message.extend_from_array(&27u32.to_be_bytes());
-    message.extend_from_array(&zero); // nonce
+    message.extend_from_array(&[7u8; 32]); // nonce
     message.extend_from_array(&zero); // sender
     message.extend_from_array(&address_bytes32(handler).to_array()); // recipient
     message.extend_from_array(&zero); // destination caller
@@ -160,6 +160,8 @@ fn settles_and_splits_the_minted_amount() {
     assert_eq!(receipt.amount, 1_000);
     assert_eq!(receipt.fee, 50);
     assert_eq!(receipt.relayer, s.relayer);
+    assert_eq!(receipt.source_domain, 26);
+    assert_eq!(receipt.nonce, BytesN::from_array(&s.env, &[7u8; 32]));
     assert_eq!(receipt.relayer_fee, 35);
     assert_eq!(receipt.treasury_fee, 15);
     assert_eq!(balance(&s, &s.recipient), 950);

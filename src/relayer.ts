@@ -11,6 +11,8 @@ export interface SettlementMessage {
   amount: bigint;
   fee: bigint;
   recipient: string;
+  sourceDomain: number;
+  nonce: string;
   handler: Buffer;
   mintRecipient: Buffer;
   destinationCaller: Buffer;
@@ -31,6 +33,8 @@ export interface AttestationOptions {
 }
 
 const BODY_START = 148;
+const HEADER_SOURCE_DOMAIN_OFFSET = 4;
+const HEADER_NONCE_OFFSET = 12;
 const HEADER_RECIPIENT_OFFSET = 76;
 const HEADER_DESTINATION_CALLER_OFFSET = 108;
 const BODY_AMOUNT_OFFSET = BODY_START + 68;
@@ -90,6 +94,8 @@ export function parseSettlementMessage(message: Buffer): SettlementMessage {
     amount,
     fee,
     recipient,
+    sourceDomain: message.readUInt32BE(HEADER_SOURCE_DOMAIN_OFFSET),
+    nonce: message.subarray(HEADER_NONCE_OFFSET, HEADER_NONCE_OFFSET + 32).toString("hex"),
     handler: readBytes32(message, HEADER_RECIPIENT_OFFSET),
     mintRecipient: readBytes32(message, BODY_MINT_RECIPIENT_OFFSET),
     destinationCaller: readBytes32(message, HEADER_DESTINATION_CALLER_OFFSET),

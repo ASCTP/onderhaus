@@ -22,6 +22,10 @@ use soroban_sdk::{
 
 /// The CCTP message header is 148 bytes and the burn body starts immediately after it.
 const MESSAGE_BODY_OFFSET: u32 = 148;
+/// Within the header, `sourceDomain` is the chain the burn came from.
+const HEADER_SOURCE_DOMAIN_OFFSET: u32 = 4;
+/// Within the header, `nonce` identifies the CCTP message across source chains.
+const HEADER_NONCE_OFFSET: u32 = 12;
 /// Within the header, `recipient` is the handler contract, which must be the TokenMessengerMinter.
 const HEADER_RECIPIENT_OFFSET: u32 = 76;
 /// Within the burn body, `mintRecipient` is the contract that receives the mint.
@@ -87,6 +91,8 @@ pub struct SettlementConfig {
 pub struct SettlementReceipt {
     pub recipient: Address,
     pub relayer: Address,
+    pub source_domain: u32,
+    pub nonce: BytesN<32>,
     pub amount: i128,
     pub fee: i128,
     pub relayer_fee: i128,
@@ -100,6 +106,8 @@ pub struct Settled {
     pub recipient: Address,
     #[topic]
     pub relayer: Address,
+    pub source_domain: u32,
+    pub nonce: BytesN<32>,
     pub amount: i128,
     pub fee: i128,
     pub relayer_fee: i128,
@@ -148,6 +156,9 @@ impl SettlementContract {
         }
 
         let contract = e.current_contract_address();
+        let source_domain = read_u32(&message, HEADER_SOURCE_DOMAIN_OFFSET)
+            .unwrap_or_else(|| panic_with_error!(&e, SettlementError::MessageTooShort));
+        let nonce = read_bytes32(&e, &message, HEADER_NONCE_OFFSET);
 
         let expected_handler = get_address(&e, DataKey::TokenMessengerMinter);
         let handler_bytes = read_bytes32(&e, &message, HEADER_RECIPIENT_OFFSET);
@@ -220,6 +231,8 @@ impl SettlementContract {
         let receipt = SettlementReceipt {
             recipient: recipient_address,
             relayer: relayer.clone(),
+            source_domain,
+            nonce: nonce.clone(),
             amount,
             fee: parsed.fee,
             relayer_fee,
@@ -228,6 +241,8 @@ impl SettlementContract {
         Settled {
             recipient: receipt.recipient.clone(),
             relayer: receipt.relayer.clone(),
+            source_domain: receipt.source_domain,
+            nonce: receipt.nonce.clone(),
             amount: receipt.amount,
             fee: receipt.fee,
             relayer_fee: receipt.relayer_fee,
