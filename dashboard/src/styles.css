@@ -397,7 +397,8 @@ tbody tr:focus-visible {
 }
 
 select,
-input[type="password"] {
+input[type="password"],
+input[type="text"] {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;

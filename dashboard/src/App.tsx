@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { ProtocolStats, RelayerStat, TransferEvent, TransferPage } from "./types";
+import type { Settlement, SettlementPage, SettlementRelayerStat, SettlementStats } from "./types";
 import { DailyChart } from "./components/DailyChart";
-import { StatsGrid } from "./components/Stats";
-import { Pager, TransferDetail, TransferFilters, TransfersTable, type Filters } from "./components/Transfers";
-import { RelayersTable } from "./components/Relayers";
+import { SettlementStatsGrid } from "./components/SettlementStats";
+import {
+  SettlementDetail,
+  SettlementFilters,
+  SettlementPager,
+  SettlementsTable,
+  type Filters,
+} from "./components/Settlements";
+import { SettlementRelayersTable } from "./components/SettlementRelayers";
 import { OperatorPanel } from "./components/Operator";
 import { EmptyState, ErrorBanner } from "./components/Bits";
 
-type Tab = "overview" | "transfers" | "relayers" | "operator";
+type Tab = "overview" | "settlements" | "relayers" | "operator";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
-  { id: "transfers", label: "Transfers" },
+  { id: "settlements", label: "Settlements" },
   { id: "relayers", label: "Relayers" },
   { id: "operator", label: "Operator" },
 ];
@@ -21,25 +27,25 @@ const PAGE_SIZE = 25;
 
 export function App() {
   const [tab, setTab] = useState<Tab>("overview");
-  const [stats, setStats] = useState<ProtocolStats | null>(null);
-  const [relayers, setRelayers] = useState<RelayerStat[]>([]);
-  const [page, setPage] = useState<TransferPage | null>(null);
-  const [filters, setFilters] = useState<Filters>({ direction: "", status: "" });
+  const [stats, setStats] = useState<SettlementStats | null>(null);
+  const [relayers, setRelayers] = useState<SettlementRelayerStat[]>([]);
+  const [page, setPage] = useState<SettlementPage | null>(null);
+  const [filters, setFilters] = useState<Filters>({ relayer: "", sourceDomain: "" });
   const [offset, setOffset] = useState(0);
-  const [selected, setSelected] = useState<TransferEvent | null>(null);
+  const [selected, setSelected] = useState<Settlement | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const [nextStats, nextRelayers, nextPage] = await Promise.all([
-        api.stats(),
-        api.relayers(),
-        api.transfers({
+        api.settlementStats(),
+        api.settlementRelayers(),
+        api.settlements({
           limit: PAGE_SIZE,
           offset,
-          direction: filters.direction || undefined,
-          status: filters.status || undefined,
+          relayer: filters.relayer || undefined,
+          sourceDomain: filters.sourceDomain === "" ? undefined : Number(filters.sourceDomain),
         }),
       ]);
       setStats(nextStats);
@@ -58,14 +64,6 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  async function openTransfer(burnTxHash: string) {
-    try {
-      setSelected(await api.transfer(burnTxHash));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
   const network = stats?.network ?? "testnet";
 
   return (
@@ -78,7 +76,7 @@ export function App() {
         <div className="masthead-right">
           <span className={`badge ${network === "mainnet" ? "badge-danger" : "badge-info"}`}>{network}</span>
           <span className="live">
-            <span className="dot" /> live
+            <span className="dot" /> on chain
           </span>
           <span className="updated">
             {lastUpdated ? `updated ${lastUpdated.toLocaleTimeString()}` : "connecting"}
@@ -103,34 +101,34 @@ export function App() {
 
       {tab === "overview" ? (
         <>
-          <StatsGrid stats={stats} />
+          <SettlementStatsGrid stats={stats} />
           {stats ? <DailyChart daily={stats.daily} /> : null}
           <section className="panel">
             <div className="panel-head">
-              <h2>Recent transfers</h2>
-              <button type="button" className="link-button" onClick={() => setTab("transfers")}>
+              <h2>Recent settlements</h2>
+              <button type="button" className="link-button" onClick={() => setTab("settlements")}>
                 View all
               </button>
             </div>
-            {page && page.transfers.length > 0 ? (
-              <TransfersTable
-                page={{ ...page, transfers: page.transfers.slice(0, 8) }}
-                onSelect={(hash) => void openTransfer(hash)}
+            {page && page.settlements.length > 0 ? (
+              <SettlementsTable
+                page={{ ...page, settlements: page.settlements.slice(0, 8) }}
+                onSelect={(settlement) => setSelected(settlement)}
               />
             ) : (
-              <EmptyState title="No transfers recorded yet">
-                The dashboard reads the service ledger and imported settlement events for this network.
+              <EmptyState title="No settlements indexed yet">
+                Run the settlement indexer to read settlement events from the contract.
               </EmptyState>
             )}
           </section>
         </>
       ) : null}
 
-      {tab === "transfers" ? (
+      {tab === "settlements" ? (
         <section className="panel">
           <div className="panel-head">
-            <h2>Transfers</h2>
-            <TransferFilters
+            <h2>Settlements</h2>
+            <SettlementFilters
               filters={filters}
               onChange={(next) => {
                 setFilters(next);
@@ -138,8 +136,8 @@ export function App() {
               }}
             />
           </div>
-          <TransfersTable page={page} onSelect={(hash) => void openTransfer(hash)} />
-          <Pager page={page} onPage={setOffset} />
+          <SettlementsTable page={page} onSelect={(settlement) => setSelected(settlement)} />
+          <SettlementPager page={page} onPage={setOffset} />
         </section>
       ) : null}
 
@@ -149,7 +147,7 @@ export function App() {
             <h2>Relayers</h2>
             <span className="muted">Permissionless settlement</span>
           </div>
-          <RelayersTable relayers={relayers} />
+          <SettlementRelayersTable relayers={relayers} />
         </section>
       ) : null}
 
@@ -157,10 +155,10 @@ export function App() {
 
       <footer className="footer">
         <span>Onderhaus public dashboard</span>
-        <span>{network} data, refreshed every 15 seconds</span>
+        <span>{network} settlement events, refreshed every 15 seconds</span>
       </footer>
 
-      {selected ? <TransferDetail transfer={selected} onClose={() => setSelected(null)} /> : null}
+      {selected ? <SettlementDetail settlement={selected} onClose={() => setSelected(null)} /> : null}
     </div>
   );
 }

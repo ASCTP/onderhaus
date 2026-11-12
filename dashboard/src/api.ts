@@ -2,6 +2,10 @@ import type {
   OperatorStatus,
   ProtocolStats,
   RelayerStat,
+  Settlement,
+  SettlementPage,
+  SettlementRelayerStat,
+  SettlementStats,
   TransferEvent,
   TransferPage,
 } from "./types";
@@ -31,6 +35,13 @@ export interface TransferRequest {
   status?: string;
 }
 
+export interface SettlementRequest {
+  limit?: number;
+  offset?: number;
+  relayer?: string;
+  sourceDomain?: number;
+}
+
 export const api = {
   stats: (): Promise<ProtocolStats> => getJson<ProtocolStats>("/v1/public/stats"),
 
@@ -48,6 +59,24 @@ export const api = {
 
   relayers: (): Promise<{ relayers: RelayerStat[] }> =>
     getJson<{ relayers: RelayerStat[] }>("/v1/public/relayers"),
+
+  settlementStats: (): Promise<SettlementStats> =>
+    getJson<SettlementStats>("/v1/public/settlement-stats"),
+
+  settlements: (params: SettlementRequest = {}): Promise<SettlementPage> => {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "") search.set(key, String(value));
+    }
+    const suffix = search.toString();
+    return getJson<SettlementPage>(`/v1/public/settlements${suffix === "" ? "" : `?${suffix}`}`);
+  },
+
+  settlement: (sourceDomain: number, nonce: string): Promise<Settlement> =>
+    getJson<Settlement>(`/v1/public/settlements/${sourceDomain}/${encodeURIComponent(nonce)}`),
+
+  settlementRelayers: (): Promise<{ relayers: SettlementRelayerStat[] }> =>
+    getJson<{ relayers: SettlementRelayerStat[] }>("/v1/public/settlement-relayers"),
 
   operatorStatus: async (key: string): Promise<OperatorStatus> => {
     const response = await fetch(`${BASE}/v1/status`, {

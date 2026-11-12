@@ -16,9 +16,9 @@ Arc settles on Arc, where gas is paid in native USDC, and is funded from a secon
 This is Phase 1 of three, and it is an early proof that runs rather than a product with
 users. What exists today is a single authenticated service that completes transfers in both
 directions, both directions have been exercised end to end on testnet, and a public
-read-only dashboard sits over the ledger. Arc to Stellar has since been completed on mainnet
-against a funded account, and Stellar to Arc has not. There is no hosted instance. See
-[Scope](#scope) for the precise boundary.
+read-only dashboard now reads settlement events from the testnet settlement contract. Arc to
+Stellar has since been completed on mainnet against a funded account, and Stellar to Arc has
+not. There is no hosted instance. See [Scope](#scope) for the precise boundary.
 
 ## The gap this fills
 
@@ -126,26 +126,33 @@ string.
 
 ## Public dashboard
 
-`dashboard/` is a separate Vite and React app that reads a public, read-only slice of the
-ledger. It is the first milestone of the move from a private paymaster to a trustless
-settlement protocol, and it shows what an explorer would: transfers, volume, success rate,
-latency, fees, and relayers.
+`dashboard/` is a separate Vite and React app that reads indexed events from the settlement
+contract. It shows what an explorer would: settlements, volume, fees, relayer share,
+treasury share, message ids, and relayers. The service ledger routes remain available for
+the legacy paymaster, but the dashboard now treats the chain as the source of truth.
 
 ```bash
 pnpm install
 pnpm dev            # API on :3000
+pnpm settlement:index -- --contract C...
 pnpm dashboard:dev  # dashboard on :5173, proxying /v1 to the API
 ```
 
+The indexer stores a cursor next to the settlements, so a restart resumes from the last
+processed event instead of rescanning the retention window. Pass `--once` for a single pass.
 The public routes need no key and are bounded by the same per-address limiter as everything
 else:
 
 | Route | Returns |
 | --- | --- |
-| `GET /v1/public/stats` | Totals, success rate, USDC volume, fees by unit, latency, relayers, and 14 daily points. |
-| `GET /v1/public/transfers` | A page of transfers, filterable by `direction`, `status`, `limit`, and `offset`. |
-| `GET /v1/public/transfers/:burnTxHash` | One transfer, or 404. |
-| `GET /v1/public/relayers` | Completed transfers and volume grouped by relayer. |
+| `GET /v1/public/stats` | Legacy paymaster totals, success rate, USDC volume, fees by unit, latency, relayers, and 14 daily points. |
+| `GET /v1/public/transfers` | A page of legacy paymaster transfers, filterable by `direction`, `status`, `limit`, and `offset`. |
+| `GET /v1/public/transfers/:burnTxHash` | One legacy transfer, or 404. |
+| `GET /v1/public/relayers` | Legacy completed transfers and volume grouped by relayer. |
+| `GET /v1/public/settlement-stats` | Settlement totals, volume, fees, relayer and treasury shares, and 14 daily points. |
+| `GET /v1/public/settlements` | A page of indexed settlements, filterable by `relayer`, `recipient`, `sourceDomain`, `limit`, and `offset`. |
+| `GET /v1/public/settlements/:sourceDomain/:nonce` | One settlement, or 404. |
+| `GET /v1/public/settlement-relayers` | Indexed settlements, volume, and fee shares grouped by relayer. |
 
 Service balances and API keys stay behind a key on `/v1/status`. The dashboard's Operator tab
 asks for that key and keeps it in `sessionStorage` for the tab only.
@@ -163,6 +170,35 @@ pnpm transfer:import -- --file transfers.json --network testnet
 
 Re-importing the same burn hash on the same network updates the row rather than duplicating
 it.
+
+## Settlement contract
+
+`contracts/settlement` is the on-chain half of the trustless path. The sender burns USDC
+through CCTP with the settlement contract as the mint recipient and destination caller, and
+carries the recipient and the agreed fee in the hook. Anyone may call `settle`; the contract
+receives the mint, pays the relayer its share, pays the treasury its share, and forwards the
+rest to the recipient in one transaction. The fee split and the maximum fee are fixed in the
+constructor and there is no admin surface.
+
+The testnet deployment used for the dashboard is
+`CARSIIMF4ERN5V2TTTQT4ACFFKJKKDZAD4RLV64B6D2I5S4UDFHPQN2R` with a 70/30 relayer/treasury
+split and a 500 bps maximum fee. The `settled` event carries the source domain and the CCTP
+nonce, which is what lets the indexer identify a settlement independently of the Stellar
+transaction that submitted it.
+
+A relayer with a funded XLM account and a USDC trustline can settle a burn:
+
+```bash
+pnpm exec tsx scripts/relay.ts \
+  --contract CARSIIMF4ERN5V2TTTQT4ACFFKJKKDZAD4RLV64B6D2I5S4UDFHPQN2R \
+  --burn 0x...
+```
+
+The command reads the contract configuration, waits for the Iris attestation, refuses a
+payout below `--min-payout` (0.005 USDC by default), checks that the message mints to this
+contract and targets the expected Stellar token messenger, and then submits `settle`. The
+relayer address is passed as an argument and must sign the transaction, so a settlement
+cannot redirect the relayer fee to an address that did not authorize it.
 
 ## Producing the burn to complete
 
@@ -310,6 +346,10 @@ to fetch`, which a client cannot tell apart from the host being down.
 Built:
 
 - An authenticated HTTP service that completes CCTP transfers in both directions
+- A testnet settlement contract that receives the CCTP mint, splits the fee between the
+  relayer and the treasury, and forwards the remainder to the recipient
+- A permissionless relayer CLI with a payout floor and message-target validation
+- A cursor-based settlement indexer and a dashboard and public API over its events
 - Pre-spend verification that a Stellar recipient exists and holds a USDC trustline
 - Per-direction balance monitoring on whichever account pays for a leg, with an independent
   low-balance halt on each
@@ -320,30 +360,37 @@ Built:
 
 Not built:
 
-- An on-chain fee mechanism. The dashboard is the first step of that pivot; the settlement
-  contract, open relayers, and a hosted public instance follow.
+- A production relayer network, a mainnet settlement deployment, and a hosted public
+  instance
 - A mainnet run in the Stellar to Arc direction. Arc to Stellar has been completed on
   mainnet, but the reverse has only ever run on testnet.
-- Batch submission. Each completion is one request.
+- Batch submission. Each completion or settlement is one transaction.
 
 ## Fee model
 
-Every completion spends real money from whichever service account pays for that direction,
-XLM from the Stellar-funded account and native USDC from the Arc-funded one, so access is
-metered rather than open. Each integrating app gets an API key carrying a per-minute rate
-limit and an optional daily cap, and every completion is written to a local ledger holding
-the API key, the burn hash, the direction, the recipient, and the outcome.
+There are two paths today. The settlement contract charges its fee on chain at settlement
+time. The sender puts the fee in the burn hook, the contract takes it from the minted amount,
+pays 70 percent to the relayer and 30 percent to the treasury by default, and forwards the
+rest to the recipient. No API key is involved and no invoice is sent.
 
-Payment is off-band. Usage is invoiced on a cycle you set, and nothing enforces payment
-on-chain, so the model rests on the integrator paying. That ledger is both the billing record
-and the idempotency guard, since it is unique on the API key, the burn hash, and the network
-together. The direction is deliberately not part of that key, which is safe because the two
-hash formats cannot collide: a Stellar hash is bare and an Arc one carries the `0x` prefix,
-so the same text is never valid for both legs.
+On the legacy paymaster path, every completion spends real money from whichever service
+account pays for that direction, XLM from the Stellar-funded account and native USDC from the
+Arc-funded one, so access is metered rather than open. Each integrating app gets an API key
+carrying a per-minute rate limit and an optional daily cap, and every completion is written
+to a local ledger holding the API key, the burn hash, the direction, the recipient, and the
+outcome.
 
-The trustless alternative is a USDC fee taken on the source chain at burn time, or skimmed by
-a forwarder contract before forwarding. Both need on-chain code this service does not ship,
-and both are the path once there is volume worth the audit.
+Payment on that legacy path is off-band. Usage is invoiced on a cycle you set, and nothing
+enforces payment on-chain, so the model rests on the integrator paying. That ledger is both
+the billing record and the idempotency guard, since it is unique on the API key, the burn
+hash, and the network together. The direction is deliberately not part of that key, which is
+safe because the two hash formats cannot collide: a Stellar hash is bare and an Arc one
+carries the `0x` prefix, so the same text is never valid for both legs.
+
+The contract path removes the off-band invoice and the API key from the settlement leg. The
+relayer fee is a public on-chain number, fixed per deployment, and any funded account with a
+USDC trustline can submit the settlement and claim it. The next step is competitive
+relaying, where the fee can vary rather than being fixed in the constructor.
 
 ## Security posture
 
@@ -400,6 +447,9 @@ See [`.env.example`](.env.example) for the full list with notes. The values that
 | `USDC_LOW_BALANCE_FLOOR` | Halt threshold for the Arc-funding account, in native USDC. |
 | `IP_RATE_LIMIT_PER_MINUTE` | Per-address ceiling covering traffic that presents no key or a malformed body. Defaults to 600. |
 | `ATTESTATION_POLL_TIMEOUT_MS` | How long one request waits for Circle before answering 409. Defaults to 30 seconds, well below the SDK's 5 minutes, so a request does not hold a connection open for minutes. |
+| `SETTLEMENT_CONTRACT_ID` | The contract whose events the indexer reads. Required by `pnpm settlement:index`. |
+| `SETTLEMENT_START_LEDGER` | Optional first ledger for a fresh index. Empty backfills the last 10000 ledgers, then the stored cursor takes over. |
+| `SETTLEMENT_POLL_INTERVAL_MS` | Indexer polling interval. Defaults to 5000. |
 | `TRUST_PROXY` | Set true only behind a proxy you control, so the per-address limit sees the real client address rather than the proxy's. |
 
 One detail about the Arc floor is worth stating plainly, because it is easy to get wrong.
@@ -419,15 +469,16 @@ pnpm test                # vitest, offline, no network access
 pnpm build               # tsup, emits ESM to dist/
 pnpm key:create          # provision an API key
 pnpm key:list            # list keys and today's usage
-pnpm transfer:import     # import settlement events into the read model
+pnpm transfer:import     # import legacy settlement events into the read model
+pnpm settlement:index    # index settlement contract events
 pnpm dashboard:dev       # dashboard dev server
 pnpm dashboard:typecheck # dashboard tsc --noEmit
 pnpm dashboard:build     # static dashboard build
 ```
 
 Tests inject fakes for the two SDK calls that would otherwise reach the network, so the
-suite runs offline and never spends anything. `pnpm test` currently passes with 108 tests
-across 5 files.
+suite runs offline and never spends anything. `pnpm test` currently passes with 138 tests
+across 7 files.
 
 Both directions have been completed against a live testnet burn produced outside the
 service, and each settlement was then verified independently of it. In both cases the
