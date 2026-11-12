@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   RelayerError,
+  addressBytes32,
   decodeMessageHex,
+  isZeroBytes32,
   parseSettlementMessage,
   pollAttestation,
   relayerShare,
@@ -10,6 +12,13 @@ import {
 const G = "GAUVTGIX55JJ5PX27CYDJ2T6E4KOGEZSDXW4A7UHPJ3GDOMLWDKY2USH";
 const C = "CANA7BI2BBCYBBKPLB4ZA4PGL4ELBWI6RR3SYGU5W2L6O2HQAJSQXUWX";
 const BODY_AMOUNT_OFFSET = 148 + 68;
+const HEADER_RECIPIENT_OFFSET = 76;
+const HEADER_DESTINATION_CALLER_OFFSET = 108;
+const BODY_MINT_RECIPIENT_OFFSET = 148 + 36;
+
+function writeBytes32(target: Buffer, offset: number, fill: number): void {
+  target.fill(fill, offset, offset + 32);
+}
 
 function writeU256(target: Buffer, offset: number, value: bigint): void {
   for (let index = 0; index < 32; index += 1) {
@@ -35,6 +44,9 @@ function buildHook(recipient: string, fee?: bigint, version = 0): Buffer {
 
 function buildMessage(hook: Buffer, amount = 5_000_000n): Buffer {
   const message = Buffer.alloc(376 + hook.length);
+  writeBytes32(message, HEADER_RECIPIENT_OFFSET, 0x11);
+  writeBytes32(message, HEADER_DESTINATION_CALLER_OFFSET, 0x22);
+  writeBytes32(message, BODY_MINT_RECIPIENT_OFFSET, 0x33);
   writeU256(message, BODY_AMOUNT_OFFSET, amount);
   hook.copy(message, 376);
   return message;
@@ -47,6 +59,9 @@ describe("parseSettlementMessage", () => {
     expect(parsed.amount).toBe(5_000_000n);
     expect(parsed.fee).toBe(100_000n);
     expect(parsed.recipient).toBe(C);
+    expect(parsed.handler).toEqual(Buffer.alloc(32, 0x11));
+    expect(parsed.mintRecipient).toEqual(Buffer.alloc(32, 0x33));
+    expect(parsed.destinationCaller).toEqual(Buffer.alloc(32, 0x22));
   });
 
   it("reads an account recipient and a zero fee when there is no fee payload", () => {
@@ -79,6 +94,22 @@ describe("parseSettlementMessage", () => {
   it("rejects a trailing payload that is not a fee", () => {
     const message = buildMessage(Buffer.concat([buildHook(C, 1n), Buffer.from([0])]));
     expect(() => parseSettlementMessage(message)).toThrow("trailing bytes");
+  });
+});
+
+describe("bytes32 helpers", () => {
+  it("recognizes the zero address", () => {
+    expect(isZeroBytes32(Buffer.alloc(32))).toBe(true);
+    expect(isZeroBytes32(Buffer.alloc(32, 1))).toBe(false);
+  });
+
+  it("converts a contract address into its payload", () => {
+    expect(addressBytes32(C)).toHaveLength(32);
+    expect(addressBytes32(C).equals(addressBytes32(C))).toBe(true);
+  });
+
+  it("rejects an account address", () => {
+    expect(() => addressBytes32(G)).toThrow(RelayerError);
   });
 });
 

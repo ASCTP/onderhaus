@@ -13,7 +13,9 @@ import { formatFixed, parseFixed } from "../src/amounts.js";
 import { applyEnvFile } from "../src/env-file.js";
 import {
   RelayerError,
+  addressBytes32,
   decodeMessageHex,
+  isZeroBytes32,
   parseSettlementMessage,
   pollAttestation,
   relayerShare,
@@ -28,6 +30,7 @@ const DEFAULT_MIN_PAYOUT = "0.005";
 interface SettlementConfig {
   usdc: string;
   treasury: string;
+  token_messenger_minter: string;
   relayer_bps: number;
 }
 
@@ -137,6 +140,16 @@ async function main(): Promise<void> {
 
   const attestation = await pollAttestation({ burnTxHash, sourceDomain: ARC_DOMAIN });
   const message = parseSettlementMessage(decodeMessageHex(attestation.message));
+  const contractBytes = addressBytes32(contractId);
+  if (!message.mintRecipient.equals(contractBytes)) {
+    throw new RelayerError("The burn mints to a different contract");
+  }
+  if (!message.handler.equals(addressBytes32(config.token_messenger_minter))) {
+    throw new RelayerError("The burn targets a different Stellar token messenger");
+  }
+  if (!isZeroBytes32(message.destinationCaller) && !message.destinationCaller.equals(contractBytes)) {
+    throw new RelayerError("The burn restricts completion to a different caller");
+  }
   const payout = relayerShare(message.fee, config.relayer_bps);
   const treasuryFee = message.fee - payout;
 

@@ -11,6 +11,9 @@ export interface SettlementMessage {
   amount: bigint;
   fee: bigint;
   recipient: string;
+  handler: Buffer;
+  mintRecipient: Buffer;
+  destinationCaller: Buffer;
 }
 
 export interface Attestation {
@@ -28,7 +31,10 @@ export interface AttestationOptions {
 }
 
 const BODY_START = 148;
+const HEADER_RECIPIENT_OFFSET = 76;
+const HEADER_DESTINATION_CALLER_OFFSET = 108;
 const BODY_AMOUNT_OFFSET = BODY_START + 68;
+const BODY_MINT_RECIPIENT_OFFSET = BODY_START + 36;
 const BODY_HOOK_OFFSET = BODY_START + 228;
 const HOOK_VERSION_OFFSET = 24;
 const HOOK_LENGTH_OFFSET = 28;
@@ -80,7 +86,25 @@ export function parseSettlementMessage(message: Buffer): SettlementMessage {
   }
 
   const amount = readU256(message.subarray(BODY_AMOUNT_OFFSET, BODY_AMOUNT_OFFSET + 32));
-  return { amount, fee, recipient };
+  return {
+    amount,
+    fee,
+    recipient,
+    handler: readBytes32(message, HEADER_RECIPIENT_OFFSET),
+    mintRecipient: readBytes32(message, BODY_MINT_RECIPIENT_OFFSET),
+    destinationCaller: readBytes32(message, HEADER_DESTINATION_CALLER_OFFSET),
+  };
+}
+
+export function isZeroBytes32(value: Buffer): boolean {
+  return value.length === 32 && value.every((byte) => byte === 0);
+}
+
+export function addressBytes32(address: string): Buffer {
+  if (!StrKey.isValidContract(address)) {
+    throw new RelayerError(`Expected a Stellar contract address, got ${address}`);
+  }
+  return Buffer.from(StrKey.decodeContract(address));
 }
 
 export function relayerShare(fee: bigint, relayerBps: number): bigint {
@@ -133,4 +157,8 @@ function readU256(bytes: Buffer): bigint {
 
 function readI128(bytes: Buffer): bigint {
   return BigInt.asIntN(128, readU256(bytes));
+}
+
+function readBytes32(message: Buffer, offset: number): Buffer {
+  return Buffer.from(message.subarray(offset, offset + 32));
 }
